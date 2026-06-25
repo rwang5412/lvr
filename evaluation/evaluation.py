@@ -28,7 +28,7 @@ STEP_LIST = [4,8,16]
 # ==== Config ====
 
 
-CHKPT_PATHS = ""
+CHKPT_PATHS = ["weights/LVR-7B"]
 
 DATASET_CONFIG = {
     'blink': {

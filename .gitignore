@@ -1,0 +1,40 @@
+# === Pretrained weights / checkpoints (download from HF, never commit) ===
+weights/
+stage1_checkpoints/
+stage2_checkpoints/
+checkpoints/
+*.safetensors
+*.bin
+*.pt
+*.pth
+*.ckpt
+
+# === Datasets / eval results (staged separately, can be large) ===
+data/
+results/
+*/results/
+
+# === Conda / installers / envs ===
+Miniconda3-*.sh
+Anaconda3-*.sh
+miniconda3/
+envs/
+*.egg-info/
+
+# === Python junk ===
+__pycache__/
+*.py[cod]
+*.so
+.ipynb_checkpoints/
+
+# === Logs / temp ===
+logs/
+*.log
+*.out
+*.err
+wandb/
+
+# === Editor / OS ===
+.vscode/
+.idea/
+.DS_Store
