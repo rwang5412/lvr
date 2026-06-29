@@ -12,15 +12,17 @@ from safetensors import safe_open
 
 from qwen_vl_utils import process_vision_info
 from PIL import Image
+import io
+import datetime
 
-CACHE_DIR = "/dockerx/Local/users/bangzheng"
-access_key_id = "cd2fce68e7166482654fe48ad7a49a2edf12b7ec"
-secret_access_key = "bLInsfvXCRP1T8GhAL89BrZ24b6w+aKD3rjxkXsSgIQ="
-endpoint_url = "https://idhpuomb10ix.compat.objectstorage.us-ashburn-1.oraclecloud.com"
-bucket_name = "bangzhengli"
-region_name = "us-ashburn-1"
+# CACHE_DIR = "/dockerx/Local/users/bangzheng"
+# access_key_id = "cd2fce68e7166482654fe48ad7a49a2edf12b7ec"
+# secret_access_key = "bLInsfvXCRP1T8GhAL89BrZ24b6w+aKD3rjxkXsSgIQ="
+# endpoint_url = "https://idhpuomb10ix.compat.objectstorage.us-ashburn-1.oraclecloud.com"
+# bucket_name = "bangzhengli"
+# region_name = "us-ashburn-1"
 
-oci_handler = OCIFolderCheckpointHandler(access_key_id, secret_access_key, endpoint_url, bucket_name, region_name)
+# oci_handler = OCIFolderCheckpointHandler(access_key_id, secret_access_key, endpoint_url, bucket_name, region_name)
 
 from src.train.monkey_patch_forward_lvr import replace_qwen2_5_with_mixed_modality_forward_lvr
 
@@ -43,11 +45,70 @@ DATASET_CONFIG = {
         "loader": lambda gen_w_head,run_name,decoding_strategy: load_mmvp_dataset(gen_w_head,run_name,decoding_strategy),
         "evaluator": lambda model,proc,data,img_dir,out_dir,ds_name,decoding_strategy: evaluate_mmvp(model, proc, data, img_dir, out_dir, ds_name, decoding_strategy),
     },
+    "hrbench_4k": {
+        "loader": lambda gen_w_head,run_name,decoding_strategy: load_hrbench_4k_dataset(gen_w_head,run_name,decoding_strategy),
+        "evaluator": lambda model,proc,data,img_dir,out_dir,ds_name,decoding_strategy: evaluate_generic(model, proc, data, img_dir, out_dir, ds_name, decoding_strategy),
+    },
+    "hrbench_8k": {
+        "loader": lambda gen_w_head,run_name,decoding_strategy: load_hrbench_8k_dataset(gen_w_head,run_name,decoding_strategy),
+        "evaluator": lambda model,proc,data,img_dir,out_dir,ds_name,decoding_strategy: evaluate_generic(model, proc, data, img_dir, out_dir, ds_name, decoding_strategy),
+    },
+    "mme_realworld": {
+        "loader": lambda gen_w_head,run_name,decoding_strategy: load_mme_realworld_dataset(gen_w_head,run_name,decoding_strategy),
+        "evaluator": lambda model,proc,data,img_dir,out_dir,ds_name,decoding_strategy: evaluate_generic(model, proc, data, img_dir, out_dir, ds_name, decoding_strategy),
+    },
 }
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+EVAL_DIR = os.path.dirname(os.path.abspath(__file__))
+
 # ==== Core utilities ====
+
+def _to_pil(img):
+    """Return a PIL.Image from whatever the HF row gives us (PIL, {bytes,path} dict, or raw bytes)."""
+    if isinstance(img, Image.Image):
+        return img
+    if isinstance(img, dict):
+        if img.get("bytes") is not None:
+            return Image.open(io.BytesIO(img["bytes"])).convert("RGB")
+        if img.get("path"):
+            return Image.open(img["path"]).convert("RGB")
+    if isinstance(img, (bytes, bytearray)):
+        return Image.open(io.BytesIO(img)).convert("RGB")
+    return img  # path / url — handled downstream by qwen_vl_utils
+
+def _row_image(row):
+    """Extract a PIL image from a HF row whether the image is under an 'image' feature
+    or split into separate top-level 'bytes'/'path' columns."""
+    if row.get("image") is not None:
+        return _to_pil(row["image"])
+    if row.get("bytes") is not None:
+        return Image.open(io.BytesIO(row["bytes"])).convert("RGB")
+    if row.get("path"):
+        return Image.open(row["path"]).convert("RGB")
+    raise KeyError("No image field found in row (looked for 'image', 'bytes', 'path').")
+
+class _Tee:
+    """Duplicate everything written to stdout into a log file as well, so all printed
+    evaluation results are persisted, not just shown in the terminal."""
+    def __init__(self, *streams):
+        self.streams = streams
+    def write(self, data):
+        for s in self.streams:
+            s.write(data)
+            s.flush()
+        return len(data)
+    def flush(self):
+        for s in self.streams:
+            s.flush()
+
+def _results_dir(ds_name, gen_w_head, run_name, decoding_strategy):
+    """Portable, repo-relative output dir for a benchmark's result JSONs."""
+    prefix = "GenWHead" if gen_w_head else ""
+    return os.path.join(
+        EVAL_DIR, ds_name, "results", f"decoding_by_{decoding_strategy}", prefix + run_name
+    )
 
 def accuracy_reward(response: str, ground_truth: str) -> float:
     # content_match = re.search(r"<answer>(.*?)</answer>", response)
@@ -66,6 +127,10 @@ def get_task_instruction(bench_name):
     elif bench_name == "mmvp":
         return "\nAnswer with the option's letter from the given choices directly."
     elif bench_name == "blink":
+        return "\nAnswer with the option's letter from the given choices directly."
+    elif bench_name in ("hrbench_4k", "hrbench_8k"):
+        return "\nAnswer with the option's letter from the given choices directly."
+    elif bench_name == "mme_realworld":
         return "\nAnswer with the option's letter from the given choices directly."
     else:
         raise ValueError(f"Unknown benchmark: {bench_name}")
@@ -114,7 +179,7 @@ def load_model_and_processor(chkpt_pth):
         config=config,
         trust_remote_code=True,
         torch_dtype="auto",
-        attn_implementation="flash_attention_2",
+        attn_implementation="sdpa",
         device_map="auto",)
 
     processor = AutoProcessor.from_pretrained(chkpt_pth)
@@ -349,6 +414,87 @@ def evaluate_blink(
         print(category+','+",".join([f"{items*100:.2f}" for items in res]))
     return
 
+def evaluate_generic(
+        model,
+        processor,
+        dataset,
+        image_dir,
+        out_dir,
+        ds_name,
+        decoding_strategy="steps",
+        ):
+    """Generic multiple-choice evaluator for datasets normalized to the BLINK-style schema:
+    {question_id, image, query, label, category}. Mirrors evaluate_blink but discovers the
+    category set dynamically instead of using a hardcoded list. Images are embedded (PIL),
+    so image_dir is unused."""
+    print(f"Evaluating {ds_name} with decoding strategy: {decoding_strategy}")
+    os.makedirs(out_dir,exist_ok=True)
+    task_instruction = get_task_instruction(ds_name)
+    step2results_category = {}
+    step2results_overall = {}
+    for steps in STEP_LIST:
+        step2results_category[steps] = {}
+        if len(task_instruction)>0 and task_instruction[0] != ' ':
+            out_file = os.path.join(out_dir,f"{decoding_strategy}{steps:03d}.json")
+        else:
+            out_file = os.path.join(out_dir,f"{decoding_strategy}{steps:03d}_noTaskInstruction.json")
+        total, correct = 0, 0
+        res_by_category = {}
+        if os.path.exists(out_file):
+            with open(out_file, "r") as f:
+                result = json.load(f)
+            # Recompute accuracy
+            for res in result:
+                if res["category"] not in res_by_category:
+                    res_by_category[res["category"]] = {"total":0,"correct":0}
+                if accuracy_reward(res["prediction"][0], res["label"]):
+                    correct += 1
+                    res_by_category[res["category"]]["correct"] += 1
+                total += 1
+                res_by_category[res["category"]]["total"] += 1
+            step2results_category[steps] = res_by_category
+            step2results_overall[steps] = {"total": total, "correct": correct}
+        else:
+            result = []
+            for dat in tqdm(dataset,desc=f"Evaluating {ds_name}, decoding by steps={steps}"):
+                img_path = dat['image']
+                text = dat['query'] + task_instruction
+                outputs = run_inference(model, processor,img_path,text,steps,decoding_strategy)
+
+                res = {
+                    'id': dat['question_id'],
+                    'prediction': outputs,
+                    'label': dat['label'],
+                    'category': dat['category']
+                }
+                result.append(res)
+                if res["category"] not in res_by_category:
+                    res_by_category[res["category"]] = {"total":0,"correct":0}
+                if accuracy_reward(outputs[0], dat['label']):
+                    correct += 1
+                    res_by_category[res["category"]]["correct"] += 1
+                total += 1
+                res_by_category[res["category"]]["total"] += 1
+            step2results_category[steps] = res_by_category
+            step2results_overall[steps] = {"total": total, "correct": correct}
+            json.dump(result,open(out_file,'w+'),indent=2)
+        print(f"Steps: {steps} - Accuracy: {correct}/{total} = {correct/total*100:.2f}")
+    # print overall
+    print("Overall accuracy by steps:")
+    print(",".join([f"{items['correct']/items['total']*100:.2f}" for items in step2results_overall.values()]))
+    # print by category (discovered dynamically across all steps)
+    categories = sorted({cat for res in step2results_category.values() for cat in res})
+    for category in categories:
+        res  = []
+        for steps in step2results_category:
+            res_by_category = step2results_category[steps]
+            if category in res_by_category:
+                cat_total = res_by_category[category]["total"]
+                cat_correct = res_by_category[category]["correct"]
+                res.append(cat_correct/cat_total)
+        print(category+','+",".join([f"{items*100:.2f}" for items in res]))
+    return
+
 """Data Loaders"""
 # ==== Example dataset loader stubs ====
 def load_vstar_dataset(gen_w_head,run_name,decoding_strategy):
@@ -442,10 +588,78 @@ def load_blink_dataset(gen_w_head,run_name,decoding_strategy):
         out_dir = os.path.join("/dockerx/bangzhli/projects/LVR-Finetune/evaluation/blink/results",f"decoding_by_{decoding_strategy}",run_name)
 
     return processed_data,image_dir,out_dir,ds_name
+
+def _load_hrbench(hr_config,gen_w_head,run_name,decoding_strategy):
+    # hr_config is "hrbench_4k" or "hrbench_8k"; used as both the HF config and the ds_name.
+    ds_name = hr_config
+    dsd = load_dataset("DreamMr/HR-Bench", hr_config)
+    split = list(dsd.keys())[0]  # split name varies by repo version
+    ds = dsd[split]
+
+    processed_data = []
+    for dat in ds:
+        option_string = ""
+        for letter in ['A','B','C','D']:
+            option_string += f"{letter}. {dat[letter]}\n"
+        question = dat['question'] + "\nOptions:\n" + option_string
+        ans = dat['answer'].strip().upper()[0]
+        buffer = {
+            "question_id": dat["index"],
+            "image": _row_image(dat),
+            "query": question,
+            "label": ans,
+            "category": dat["category"],  # single (FSP) / cross (FCP)
+        }
+        processed_data.append(buffer)
+
+    image_dir = None
+    out_dir = _results_dir(ds_name, gen_w_head, run_name, decoding_strategy)
+    return processed_data,image_dir,out_dir,ds_name
+
+def load_hrbench_4k_dataset(gen_w_head,run_name,decoding_strategy):
+    return _load_hrbench("hrbench_4k",gen_w_head,run_name,decoding_strategy)
+
+def load_hrbench_8k_dataset(gen_w_head,run_name,decoding_strategy):
+    return _load_hrbench("hrbench_8k",gen_w_head,run_name,decoding_strategy)
+
+def load_mme_realworld_dataset(gen_w_head,run_name,decoding_strategy):
+    ds_name = "mme_realworld"
+    # Lite split: 50 samples per task. Images are embedded; "multi-choice options" already
+    # carry "(A) ..." prefixes, so just join them under the question.
+    dsd = load_dataset("yifanzhang114/MME-RealWorld-Lite")
+    split = "train" if "train" in dsd else list(dsd.keys())[0]
+    ds = dsd[split]
+
+    processed_data = []
+    for dat in ds:
+        options = dat["multi-choice options"]
+        question = dat["question"] + "\n" + "\n".join(options)
+        ans = dat["answer"].strip().upper()[0]
+        buffer = {
+            "question_id": dat["index"],
+            "image": _row_image(dat),
+            "query": question,
+            "label": ans,
+            "category": dat["l2-category"],  # subtask, for per-category breakdown
+        }
+        processed_data.append(buffer)
+
+    image_dir = None
+    out_dir = _results_dir(ds_name, gen_w_head, run_name, decoding_strategy)
+    return processed_data,image_dir,out_dir,ds_name
 # ==== Main evaluation ====
 
 def main():
     DECODING_STRATEGY = "steps"  # or "latent"
+
+    # Persist all printed output to a timestamped log file under evaluation/results_log/.
+    log_dir = os.path.join(EVAL_DIR, "results_log")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, f"eval_{datetime.datetime.now():%Y%m%d_%H%M%S}.log")
+    log_file = open(log_path, "a")
+    sys.stdout = _Tee(sys.__stdout__, log_file)
+    print(f"Logging all evaluation output to {log_path}")
+
     for checkpoint_dir in CHKPT_PATHS:
         model, processor, run_name = load_model_and_processor(checkpoint_dir)
         gen_w_head = model.config.lvr_head
@@ -455,6 +669,10 @@ def main():
             print("<"*64 + f" {bench_name} evaluation " + ">"*64)
             dataset, image_dir, out_dir, ds_name= cfg["loader"](gen_w_head,run_name,decoding_strategy=DECODING_STRATEGY)
             cfg["evaluator"](model, processor, dataset, image_dir, out_dir, ds_name, decoding_strategy=DECODING_STRATEGY)
+
+    print(f"\nDone. Full output saved to {log_path}")
+    sys.stdout = sys.__stdout__
+    log_file.close()
 
 if __name__ == "__main__":
     main()
