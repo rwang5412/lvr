@@ -31,7 +31,7 @@ class TrainingArguments(HFTrainingArguments):
     freeze_vision_tower: bool = field(default=False)
     freeze_llm: bool = field(default=False)
     freeze_merger: bool = field(default=False)
-    disable_flash_attn2: bool = field(default=False)
+    disable_flash_attn2: bool = field(default=True)  # SDPA by default: bottleneck needs a custom additive attn mask FA2 can't take
 
     max_seq_length: int = field(
         default=32768, # This is the default value of the qwen2-vl model

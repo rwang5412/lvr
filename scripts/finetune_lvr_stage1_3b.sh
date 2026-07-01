@@ -61,7 +61,7 @@ deepspeed src/train/train_lvr.py \
     --loss_lvr_lambda $LAMBDA_LVR \
     --bf16 True \
     --fp16 False \
-    --disable_flash_attn2 False \
+    --disable_flash_attn2 True \
     --online_checkpoint $ONLINE \
     --output_dir "$OUTPUT_DIR" \
     --num_train_epochs 1 \
