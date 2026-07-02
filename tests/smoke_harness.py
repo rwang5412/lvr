@@ -45,6 +45,7 @@ def main():
     model, processor, config = load_model_and_processor(args.checkpoint)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     image_token_id, lvr_id = config.image_token_id, config.lvr_id
+    lvr_start_id, lvr_end_id = config.lvr_start_id, config.lvr_end_id
 
     data_args = DataArguments(image_folder=args.image_folder)
     records = hdata.load_records(args.heldout)[:2]
@@ -53,7 +54,9 @@ def main():
 
     batch = _to_device(hdata.collate_one(collator, ds[0]), device)
     spans = get_spans(batch["input_ids"][0], batch["labels"][0],
-                      image_token_id=image_token_id, lvr_id=lvr_id)
+                      image_token_id=image_token_id, lvr_id=lvr_id,
+                      lvr_start_id=lvr_start_id, lvr_end_id=lvr_end_id)
+    ans = spans["answer"]
     n_lvr = len(spans["latent"])
     print(f"[smoke] example 0: seq_len={batch['input_ids'].shape[1]}  latent tokens={n_lvr}  "
           f"answer span={spans['answer'].as_tuple()}")
@@ -96,10 +99,10 @@ def main():
     assert d_img > 1e-4, f"zeroing pixels did NOT change logits (max|Δ|={d_img})"
     print(f"[smoke] PASS 5 image corruption changes logits: max|Δ|={d_img:.3e}")
 
-    # 6. metrics finite
-    nll_clean = float(metrics.answer_nll(clean.logits, batch["labels"]))
-    nll_zero = float(metrics.answer_nll(zc.logits, batch["labels"]))
-    nll_img = float(metrics.answer_nll(ic.logits, batch["labels"]))
+    # 6. metrics finite (scored over the answer span only)
+    nll_clean = float(metrics.answer_nll(clean.logits, batch["labels"], ans))
+    nll_zero = float(metrics.answer_nll(zc.logits, batch["labels"], ans))
+    nll_img = float(metrics.answer_nll(ic.logits, batch["labels"], ans))
     assert all(map(lambda x: x == x and abs(x) < 1e6, [nll_clean, nll_zero, nll_img])), "non-finite NLL"
     print(f"[smoke] PASS 6 answer_nll finite: clean={nll_clean:.3f} "
           f"latent0={nll_zero:.3f} imgcorrupt={nll_img:.3f}")

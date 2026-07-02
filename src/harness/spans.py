@@ -81,6 +81,8 @@ def get_spans(
     *,
     image_token_id: int,
     lvr_id: int,
+    lvr_start_id: int = None,
+    lvr_end_id: int = None,
     ignore_index: int = IGNORE_INDEX,
 ) -> Dict[str, Span]:
     """Compute image/question/latent/answer spans for one assembled example.
@@ -106,24 +108,43 @@ def get_spans(
 
     image = _contiguous_run([i for i, t in enumerate(ids) if t == image_token_id], "image")
     latent = _contiguous_run([i for i, t in enumerate(ids) if t == lvr_id], "latent")
-    answer = _contiguous_run([i for i, l in enumerate(labs) if l != ignore_index], "answer")
 
-    # Question = the instruction text between the image block and the latent block. Everything else
-    # in the prompt (system/role tokens) is neither image nor latent, and the bottleneck keeps all
-    # non-image prompt tokens open to the answer, so this range is the useful "answer→question" one.
-    if not (image.end <= latent.start):
-        raise ValueError(
-            f"get_spans: expected image block before latent block, got image={image.as_tuple()} "
-            f"latent={latent.as_tuple()}."
-        )
-    question = Span(image.end, latent.start)
+    # IMPORTANT: the dataset does NOT mask the <lvr> tokens in `labels`. The whole gpt RESPONSE
+    # (<lvr_start> <lvr>* <lvr_end> <answer-text> ...) is kept as labels; the <lvr> tokens are masked
+    # to IGNORE only at LOSS time inside the forward. So the contiguous non-ignore region is the
+    # response, and the latent block sits INSIDE it — not before it.
+    response = _contiguous_run([i for i, l in enumerate(labs) if l != ignore_index], "response")
 
-    # Layout sanity: latent precedes the answer, and the answer is the tail of the sequence.
-    if not (latent.end <= answer.start):
+    if not (image.end <= response.start):
         raise ValueError(
-            f"get_spans: expected latent block before answer, got latent={latent.as_tuple()} "
-            f"answer={answer.as_tuple()}."
+            f"get_spans: expected image block before the response, got image={image.as_tuple()} "
+            f"response={response.as_tuple()}."
         )
+    if not (response.start <= latent.start and latent.end <= response.end):
+        raise ValueError(
+            f"get_spans: expected the latent block inside the response, got latent={latent.as_tuple()} "
+            f"response={response.as_tuple()}."
+        )
+
+    # Question = the instruction text between the image block and where the response begins.
+    question = Span(image.end, response.start)
+
+    # Answer = the response tail AFTER the latent block, skipping the structural lvr tokens
+    # (<lvr_end>, and any stray <lvr_start>/<lvr>). This is the actual answer text we score.
+    structural = {lvr_id}
+    if lvr_start_id is not None:
+        structural.add(lvr_start_id)
+    if lvr_end_id is not None:
+        structural.add(lvr_end_id)
+    a = latent.end
+    while a < response.end and ids[a] in structural:
+        a += 1
+    if a >= response.end:
+        raise ValueError(
+            f"get_spans: no answer tokens after the latent block "
+            f"(response={response.as_tuple()}, latent={latent.as_tuple()})."
+        )
+    answer = Span(a, response.end)
 
     return {"image": image, "question": question, "latent": latent, "answer": answer}
 

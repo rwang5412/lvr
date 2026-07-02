@@ -24,27 +24,34 @@ import torch.nn.functional as F
 
 # --------------------------------------------------------------------------------------- causal ---
 
-def answer_nll(logits: torch.Tensor, labels: torch.Tensor, ignore_index: int = -100) -> torch.Tensor:
-    """Mean teacher-forced NLL over the answer tokens of ONE example.
+def answer_nll(logits: torch.Tensor, labels: torch.Tensor, answer_span, ignore_index: int = -100) -> torch.Tensor:
+    """Mean teacher-forced NLL over the ANSWER-TEXT tokens of ONE example.
+
+    The dataset's `labels` keep the WHOLE response (including <lvr> tokens), so we cannot just use
+    `labels != ignore_index` — that would also score the latent tokens. We restrict scoring to
+    `answer_span` (from get_spans), which is the answer text after the latent block.
 
     Args:
         logits: [1, L, V] or [L, V] float logits from the forward.
-        labels: [1, L] or [L] with the answer tokens set to their ids and everything else to
-            `ignore_index` (exactly the dataset's label convention). Only answer tokens contribute.
+        labels: [1, L] or [L] — the batch labels (whole response non-ignored).
+        answer_span: a Span(start, end) marking the answer-text token range.
     Returns:
-        scalar tensor — mean cross-entropy over the answer span. Lower = the model is more confident
-        in this answer given the latents currently in the sequence.
+        scalar tensor — mean cross-entropy over the answer span only. Lower = more confident answer
+        given the latents currently in the sequence.
     """
     if logits.dim() == 3:
         logits = logits[0]
     if labels.dim() == 2:
         labels = labels[0]
+    # Keep only the answer-text tokens as targets; ignore everything else (prompt, latents, tags).
+    targets = torch.full_like(labels, ignore_index)
+    targets[answer_span.start:answer_span.end] = labels[answer_span.start:answer_span.end]
     # standard causal shift: token t's logits predict token t+1
     shift_logits = logits[:-1, :].float()
-    shift_labels = labels[1:].to(shift_logits.device)
+    shift_labels = targets[1:].to(shift_logits.device)
     n = (shift_labels != ignore_index).sum()
     if n == 0:
-        raise ValueError("answer_nll: no answer tokens (all labels == ignore_index).")
+        raise ValueError("answer_nll: empty answer span.")
     return F.cross_entropy(shift_logits, shift_labels, ignore_index=ignore_index, reduction="mean")
 
 

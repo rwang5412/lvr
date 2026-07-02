@@ -35,7 +35,7 @@ from src.train.monkey_patch_forward_lvr import replace_qwen2_5_with_mixed_modali
 from src.model.qwen_lvr_model import QwenWithLVR
 from transformers import AutoConfig, AutoProcessor
 
-from src.harness.spans import get_spans
+from src.harness.spans import get_spans, Span
 from src.harness import metrics
 from src.harness import interventions as itv
 from src.harness import data as hdata
@@ -126,6 +126,12 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, processor, config = load_model_and_processor(args.checkpoint)
     image_token_id, lvr_id = config.image_token_id, config.lvr_id
+    lvr_start_id, lvr_end_id = config.lvr_start_id, config.lvr_end_id
+
+    def spans_of(batch):
+        return get_spans(batch["input_ids"][0], batch["labels"][0],
+                         image_token_id=image_token_id, lvr_id=lvr_id,
+                         lvr_start_id=lvr_start_id, lvr_end_id=lvr_end_id)
 
     data_args = DataArguments(image_folder=args.image_folder)
     records = hdata.load_records(args.heldout)
@@ -155,14 +161,14 @@ def main():
     # -------- Phase 1: clean + image-corruption; capture Z and targets --------
     for i in range(n):
         batch = _to_device(hdata.collate_one(collator, dataset[i]), device)
-        spans = get_spans(batch["input_ids"][0], batch["labels"][0],
-                          image_token_id=image_token_id, lvr_id=lvr_id)
+        spans = spans_of(batch)
+        ans = spans["answer"]
 
         clean = _forward(model, batch, override_latent_embeds=None)
-        nll_clean.append(float(metrics.answer_nll(clean.logits, batch["labels"])))
+        nll_clean.append(float(metrics.answer_nll(clean.logits, batch["labels"], ans)))
 
         img = _forward(model, batch, override_latent_embeds=None, zero_image=True)
-        nll_image_corrupt.append(float(metrics.answer_nll(img.logits, batch["labels"])))
+        nll_image_corrupt.append(float(metrics.answer_nll(img.logits, batch["labels"], ans)))
 
         Z = clean.latent_hidden_states.float().cpu()
         T = clean.latent_target_embeds.float().cpu()
@@ -173,7 +179,7 @@ def main():
         if args.corruption == "zero":
             over = itv.zero_latents(Z.shape[0], Z.shape[1], dtype=clean.logits.dtype, device=device)
             zc = _forward(model, batch, override_latent_embeds=over)
-            nll_latent_corrupt[i] = float(metrics.answer_nll(zc.logits, batch["labels"]))
+            nll_latent_corrupt[i] = float(metrics.answer_nll(zc.logits, batch["labels"], ans))
 
         if (i + 1) % 25 == 0:
             print(f"[harness] phase1 {i + 1}/{n}")
@@ -186,9 +192,10 @@ def main():
         mean_vec = T_cat.mean(dim=0).to(device)
         for i in range(n):
             batch = _to_device(hdata.collate_one(collator, dataset[i]), device)
+            ans = spans_of(batch)["answer"]
             over = itv.mean_replace_latents(example_L[i], mean_vec)
             mc = _forward(model, batch, override_latent_embeds=over)
-            nll_latent_corrupt[i] = float(metrics.answer_nll(mc.logits, batch["labels"]))
+            nll_latent_corrupt[i] = float(metrics.answer_nll(mc.logits, batch["labels"], ans))
             if (i + 1) % 25 == 0:
                 print(f"[harness] phase2 {i + 1}/{n}")
 
@@ -223,7 +230,7 @@ def main():
     if not args.skip_flip:
         report["directed_flip"] = _flip_to_target(
             model, collator, dataset, records, T_all, example_L,
-            image_token_id, lvr_id, device,
+            image_token_id, lvr_id, lvr_start_id, lvr_end_id, device,
         )
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -236,43 +243,45 @@ def main():
 
 
 def _flip_to_target(model, collator, dataset, records, T_all, example_L,
-                    image_token_id, lvr_id, device):
-    """For each (i, j) with different answers: build example i's sequence but with j's answer
-    teacher-forced, then score j's answer NLL under (a) i's clean latents and (b) j's latents spliced
-    in. A causal latent → splicing j's latents lowers j's answer NLL.
+                    image_token_id, lvr_id, lvr_start_id, lvr_end_id, device):
+    """For each (i, j) with different answers: build example i's prompt+latents but with j's answer
+    text teacher-forced, then score j's answer NLL under (a) i's clean latents and (b) j's latents
+    spliced in. A causal latent → splicing j's latents lowers j's answer NLL.
     """
+    def _spans(ex):
+        return get_spans(ex["input_ids"], ex["labels"], image_token_id=image_token_id, lvr_id=lvr_id,
+                         lvr_start_id=lvr_start_id, lvr_end_id=lvr_end_id)
+
     pairs = hdata.build_partner_pairs(records)
     nll_clean, nll_splice = [], []
     skipped = 0
     for (i, j) in pairs:
         ex_i = dataset[i]
         ex_j = dataset[j]
-        # j's answer token ids = ex_j.input_ids where ex_j.labels != IGNORE.
-        j_ids = ex_j["input_ids"].tolist()
-        j_labs = ex_j["labels"].tolist()
-        j_answer = [t for t, l in zip(j_ids, j_labs) if l != -100]
+        # j's ANSWER-TEXT token ids (from j's own answer span, not its whole response).
+        aj = _spans(ex_j)["answer"]
+        j_answer = ex_j["input_ids"][aj.start:aj.end].tolist()
         if not j_answer or example_L[j] == 0:
             skipped += 1
             continue
 
-        # Rebuild example i with j's answer replacing i's answer span.
-        spans_i = get_spans(ex_i["input_ids"], ex_i["labels"],
-                            image_token_id=image_token_id, lvr_id=lvr_id)
-        prompt_ids = ex_i["input_ids"][: spans_i["answer"].start].tolist()
+        # i's prompt+latents = everything before i's answer text.
+        prompt_ids = ex_i["input_ids"][: _spans(ex_i)["answer"].start].tolist()
         new_input_ids = torch.tensor(prompt_ids + j_answer, dtype=ex_i["input_ids"].dtype)
         new_labels = torch.tensor([-100] * len(prompt_ids) + j_answer, dtype=ex_i["labels"].dtype)
         flip_ex = dict(ex_i)
         flip_ex["input_ids"] = new_input_ids
         flip_ex["labels"] = new_labels
+        flip_answer = Span(len(prompt_ids), len(prompt_ids) + len(j_answer))  # pure j-answer text
 
         batch = _to_device(hdata.collate_one(collator, flip_ex), device)
         clean = _forward(model, batch, override_latent_embeds=None)
-        nll_clean.append(float(metrics.answer_nll(clean.logits, batch["labels"])))
+        nll_clean.append(float(metrics.answer_nll(clean.logits, batch["labels"], flip_answer)))
 
         partner_targets = T_all[j].to(device)
         over = itv.align_partner_latents(partner_targets, example_L[i])
         spl = _forward(model, batch, override_latent_embeds=over)
-        nll_splice.append(float(metrics.answer_nll(spl.logits, batch["labels"])))
+        nll_splice.append(float(metrics.answer_nll(spl.logits, batch["labels"], flip_answer)))
 
     result = metrics.directed_flip_scores(nll_clean, nll_splice)
     result["skipped_pairs"] = skipped

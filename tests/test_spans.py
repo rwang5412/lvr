@@ -24,29 +24,32 @@ IGN = -100
 
 
 def _fixture(n_img=4, n_lvr=3, n_q=3, n_ans=3, n_sys=2):
-    """Build one assembled example matching the real layout:
+    """Build one assembled example matching the REAL layout:
     [system][image][question][lvr_start][<lvr>*n_lvr][lvr_end][answer]
-    with labels masked everywhere except the answer span.
+
+    Crucially: the dataset does NOT mask the <lvr> tokens in labels — the WHOLE gpt response
+    (lvr_start, latents, lvr_end, answer) is non-ignore; latents are masked only at loss time in the
+    forward. The fixture must reflect that, or the test silently misses the bug real data exposes.
     """
     input_ids, labels = [], []
 
-    def add(tokens, is_answer=False):
+    def add(tokens, keep=False):
         input_ids.extend(tokens)
-        labels.extend(tokens if is_answer else [IGN] * len(tokens))
+        labels.extend(tokens if keep else [IGN] * len(tokens))
 
-    add([10 + i for i in range(n_sys)])          # system/role
-    add([IMG] * n_img)                            # image block
-    add([20 + i for i in range(n_q)])            # question text
-    add([LVR_START])                             # <|lvr_start|>  (excluded from latent)
-    add([LVR] * n_lvr)                           # <|lvr|> * n_lvr  (the latents)
-    add([LVR_END])                               # <|lvr_end|>    (excluded from latent)
-    add([30 + i for i in range(n_ans)], is_answer=True)  # answer
+    add([10 + i for i in range(n_sys)])          # system/role   (ignore — prompt)
+    add([IMG] * n_img)                            # image block   (ignore — prompt)
+    add([20 + i for i in range(n_q)])            # question text (ignore — prompt)
+    add([LVR_START], keep=True)                  # response begins: <|lvr_start|> (NON-ignore)
+    add([LVR] * n_lvr, keep=True)                # <|lvr|> latents (NON-ignore; masked only at loss)
+    add([LVR_END], keep=True)                    # <|lvr_end|>     (NON-ignore)
+    add([30 + i for i in range(n_ans)], keep=True)  # answer text  (NON-ignore)
     return input_ids, labels
 
 
 def test_basic_layout():
     input_ids, labels = _fixture(n_sys=2, n_img=4, n_q=3, n_lvr=3, n_ans=3)
-    spans = get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR)
+    spans = get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR, lvr_start_id=LVR_START, lvr_end_id=LVR_END)
 
     # image = positions 2..6 (after 2 system tokens); latent = the 3 <|lvr|> only; answer = last 3.
     assert spans["image"] == Span(2, 6), spans["image"]
@@ -70,7 +73,7 @@ def test_basic_layout():
 
 def test_non_overlap_and_order():
     input_ids, labels = _fixture()
-    spans = get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR)
+    spans = get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR, lvr_start_id=LVR_START, lvr_end_id=LVR_END)
     order = [spans["image"], spans["question"], spans["latent"], spans["answer"]]
     for a, b in zip(order, order[1:]):
         assert a.end <= b.start, (a, b)
@@ -82,8 +85,8 @@ def test_non_overlap_and_order():
 def test_accepts_nested_and_listlike():
     input_ids, labels = _fixture()
     # a [1, L] nested list (as a batch of one) must be accepted.
-    s1 = get_spans([input_ids], [labels], image_token_id=IMG, lvr_id=LVR)
-    s2 = get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR)
+    s1 = get_spans([input_ids], [labels], image_token_id=IMG, lvr_id=LVR, lvr_start_id=LVR_START, lvr_end_id=LVR_END)
+    s2 = get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR, lvr_start_id=LVR_START, lvr_end_id=LVR_END)
     assert s1 == s2
     print("PASS test_accepts_nested_and_listlike")
 
@@ -91,7 +94,7 @@ def test_accepts_nested_and_listlike():
 def test_varied_sizes():
     for n_img, n_lvr, n_ans in [(1, 1, 1), (16, 8, 5), (100, 2, 20)]:
         input_ids, labels = _fixture(n_img=n_img, n_lvr=n_lvr, n_ans=n_ans)
-        spans = get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR)
+        spans = get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR, lvr_start_id=LVR_START, lvr_end_id=LVR_END)
         assert len(spans["image"]) == n_img
         assert len(spans["latent"]) == n_lvr
         assert len(spans["answer"]) == n_ans
@@ -104,7 +107,7 @@ def test_non_contiguous_latent_raises():
     input_ids, labels = _fixture()
     input_ids[-1] = LVR  # a latent token where the answer should be
     try:
-        get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR)
+        get_spans(input_ids, labels, image_token_id=IMG, lvr_id=LVR, lvr_start_id=LVR_START, lvr_end_id=LVR_END)
     except ValueError as e:
         assert "not contiguous" in str(e), str(e)
         print("PASS test_non_contiguous_latent_raises")
@@ -119,7 +122,7 @@ def test_missing_segment_raises():
         if t == IMG:
             no_img[i] = 999  # remove all image tokens
     try:
-        get_spans(no_img, labels, image_token_id=IMG, lvr_id=LVR)
+        get_spans(no_img, labels, image_token_id=IMG, lvr_id=LVR, lvr_start_id=LVR_START, lvr_end_id=LVR_END)
     except ValueError as e:
         assert "no image tokens" in str(e), str(e)
         print("PASS test_missing_segment_raises")
