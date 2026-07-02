@@ -1,0 +1,13 @@
+LVR HARNESS REPORT — weights/LVR-7B
+examples=300  corruption=mean
+
+clean answer NLL (mean)      : 0.1663
+-- causal (mediation) --
+latent effect  (M, NLL rise) : 0.0212
+image  effect  (T, NLL rise) : 0.3153
+proportion mediated (M/T)    : 0.4786   (defined on 287/300)   [baseline expectation: ~0]
+-- latent representation --
+effective rank               : 1191.64  of dim 3584
+participation ratio          : 5.83
+avg pairwise cosine distance : 0.4202
+linear probe R² (Z→ROI)      : 0.5151
