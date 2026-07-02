@@ -90,6 +90,14 @@ class Qwen2_5_VLCausalLMOutputWithPast(ModelOutput):
     last_position_hidden_state: Optional[Tuple[torch.FloatTensor]] = None
     # next_pos_lvr:Optional[bool] = False
 
+    # HARNESS (Branch 1): the model's produced latent representation Z — the hidden state at the
+    # position preceding each <lvr> token, i.e. exactly what L_patch supervises. [L_total, H].
+    # Populated only by qwen2_5_mixed_modality_forward_lvr; None everywhere else.
+    latent_hidden_states: Optional[torch.FloatTensor] = None
+    # HARNESS (Branch 1): the ROI supervision targets injected at <lvr> positions (frozen
+    # vision-encoder patch embeddings). Probe labels + the mean-replace corruption source. [L_total, H].
+    latent_target_embeds: Optional[torch.FloatTensor] = None
+
 
 def  set_lvr_loss_fct(loss_lvr_fct: str):
     """
@@ -138,6 +146,7 @@ def qwen2_5_mixed_modality_forward_lvr(
     lvr_tokens_thw: Optional[List[torch.Tensor]] = None,      # This is for TRAINING: Where should the lvr img tokens be
     lvr_mode_switch: Optional[torch.Tensor] = None, # This is for INFERENCE: Which instance in the batch is in lvr mode
     last_position_hidden_state: Optional[torch.FloatTensor] = None, # This is for INFERENCE: last hidden state of the last position
+    override_latent_embeds: Optional[torch.FloatTensor] = None, # HARNESS (Branch 1): if set, fill <lvr> positions with these [L_total, H] instead of supervision ROI embeds (corruption / partner-splice). Order matches torch.nonzero(lvr_mask) row-major.
 ) -> Union[Tuple, Qwen2_5_VLCausalLMOutputWithPast]:
     
     output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
@@ -285,6 +294,12 @@ def qwen2_5_mixed_modality_forward_lvr(
                 delta = delta.repeat_interleave(batch_size // delta.shape[0], dim=1)
                 position_ids += delta.to(position_ids.device)
 
+    # HARNESS override (Branch 1): replace the <lvr> position embeddings with externally supplied
+    # latents (corruption / partner-splice) right before the LM forward. batch_indices/seq_positions
+    # were computed above from lvr_mask; override row order must match torch.nonzero(lvr_mask).
+    if override_latent_embeds is not None and lvr_tokens is not None:
+        inputs_embeds[batch_indices, seq_positions] = override_latent_embeds.to(inputs_embeds.dtype)
+
     outputs = self.model.language_model(
             input_ids=None,
             position_ids=position_ids,
@@ -301,6 +316,15 @@ def qwen2_5_mixed_modality_forward_lvr(
     hidden_states = outputs[0]
     last_position_hidden_state = outputs.last_hidden_state[:,-1,:]
     logits = self.lm_head(hidden_states)
+
+    # HARNESS (Branch 1): capture the model's produced latent representation Z — the hidden state at
+    # the position preceding each <lvr> token (exactly what L_patch supervises). Shape [L_total, H],
+    # row order matches torch.nonzero(lvr_mask). Detached; diagnostic only.
+    latent_hidden_states = None
+    latent_target_embeds = None
+    if lvr_tokens is not None:
+        latent_hidden_states = hidden_states[batch_indices, seq_positions - 1].detach()
+        latent_target_embeds = selected_lvr_embeds.detach()
 
     lvr_loss_fct = set_lvr_loss_fct(self.config.loss_lvr_fct)
 
@@ -346,7 +370,9 @@ def qwen2_5_mixed_modality_forward_lvr(
         hidden_states=outputs.hidden_states,
         attentions=outputs.attentions,
         rope_deltas=self.model.rope_deltas,
-        last_position_hidden_state =last_position_hidden_state
+        last_position_hidden_state =last_position_hidden_state,
+        latent_hidden_states=latent_hidden_states,
+        latent_target_embeds=latent_target_embeds,
     )
 
 
