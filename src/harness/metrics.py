@@ -81,13 +81,21 @@ def proportion_mediated(
     M = (latent - clean)          # indirect effect (via latents), per example
     T = (image - clean)           # total effect (via image), per example
 
-    mask = T > eps                # only where the image genuinely matters is the ratio defined
-    per_example = (M[mask] / T[mask]).tolist() if mask.any() else []
+    mean_M = float(M.mean())
+    mean_T = float(T.mean())
+
+    # Primary estimator: ratio of AVERAGE effects (standard mediation practice, stable).
+    # NOT mean-of-ratios — that is dominated by examples with a tiny denominator T_i and inflates the
+    # number (it read 0.48 vs the honest 0.07 on the first baseline). Mean-of-ratios kept, labelled.
+    mask = T > eps                # a per-example ratio is only defined where the image genuinely matters
+    ratios = (M[mask] / T[mask]).tolist() if mask.any() else []
 
     return {
-        "latent_effect": float(M.mean()),
-        "image_effect": float(T.mean()),
-        "proportion_mediated": float(statistics.mean(per_example)) if per_example else float("nan"),
+        "latent_effect": mean_M,                                             # M̄ — the raw NIE, primary signal
+        "image_effect": mean_T,                                              # T̄
+        "proportion_mediated": (mean_M / mean_T) if abs(mean_T) > eps else float("nan"),  # M̄/T̄ (primary)
+        "proportion_mediated_median": float(statistics.median(ratios)) if ratios else float("nan"),  # robust
+        "proportion_mediated_mean_of_ratios": float(statistics.mean(ratios)) if ratios else float("nan"),  # unstable
         "n_defined": int(mask.sum()),
         "n_total": len(nll_clean),
     }
