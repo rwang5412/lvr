@@ -43,16 +43,15 @@ def answer_nll(logits: torch.Tensor, labels: torch.Tensor, answer_span, ignore_i
         logits = logits[0]
     if labels.dim() == 2:
         labels = labels[0]
-    # Keep only the answer-text tokens as targets; ignore everything else (prompt, latents, tags).
-    targets = torch.full_like(labels, ignore_index)
-    targets[answer_span.start:answer_span.end] = labels[answer_span.start:answer_span.end]
-    # standard causal shift: token t's logits predict token t+1
-    shift_logits = logits[:-1, :].float()
-    shift_labels = targets[1:].to(shift_logits.device)
-    n = (shift_labels != ignore_index).sum()
-    if n == 0:
-        raise ValueError("answer_nll: empty answer span.")
-    return F.cross_entropy(shift_logits, shift_labels, ignore_index=ignore_index, reduction="mean")
+    s, e = answer_span.start, answer_span.end
+    if e <= s or s < 1:
+        raise ValueError(f"answer_nll: bad answer span ({s}, {e}).")
+    # Causal shift: the token at position p is predicted by logits[p-1]. So the answer tokens at
+    # positions [s, e) are scored by logits[s-1 : e-1]. Slice to JUST those ~15 positions before CE —
+    # running cross-entropy over the full [L, vocab] in fp32 needlessly allocates GBs and OOMs.
+    ans_logits = logits[s - 1:e - 1, :].float()          # [n_ans, V]
+    ans_targets = labels[s:e].to(ans_logits.device)      # [n_ans]
+    return F.cross_entropy(ans_logits, ans_targets, reduction="mean")
 
 
 def proportion_mediated(
