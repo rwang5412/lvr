@@ -78,7 +78,14 @@ def load_model_and_processor(checkpoint: str):
 def _to_device(batch, device):
     out = {}
     for k, v in batch.items():
-        out[k] = v.to(device) if torch.is_tensor(v) else v
+        if torch.is_tensor(v):
+            out[k] = v.to(device)
+        elif isinstance(v, list):
+            # lvr_tokens is a list of index tensors (collator output). They index image_embeds on the
+            # model device inside the forward, so they must be moved too — else a device mismatch.
+            out[k] = [x.to(device) if torch.is_tensor(x) else x for x in v]
+        else:
+            out[k] = v
     return out
 
 
@@ -124,6 +131,16 @@ def main():
     records = hdata.load_records(args.heldout)
     if args.limit:
         records = records[: args.limit]
+
+    # Fail fast on a wrong --image-folder: the held-out records store relative paths, so a bad root
+    # would fail every example identically. Check the first image resolves before the 300-run.
+    first_img = os.path.join(args.image_folder, records[0]["image"][0])
+    if not os.path.exists(first_img):
+        raise FileNotFoundError(
+            f"first held-out image not found: {first_img}\n"
+            f"--image-folder ({args.image_folder}) probably points at the wrong root."
+        )
+
     dataset = hdata.build_dataset(records, processor, data_args, model_id=args.checkpoint)
     collator = hdata.build_collator(processor)
 
