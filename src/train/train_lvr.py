@@ -183,6 +183,8 @@ def train():
     model.config.lvr_latent_end_id = lvr_latent_end_id
     model.config.lvr_start_id = lvr_start_id
     model.config.lvr_end_id = lvr_end_id
+    # Branch 2: bottleneck flag (off by default). When True, the forward blocks answer->image attention.
+    model.config.use_bottleneck = training_args.use_bottleneck
 
 
     # there are some dummy tokens in newer hf version

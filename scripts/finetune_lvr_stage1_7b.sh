@@ -26,6 +26,7 @@ GRAD_ACCUM_STEPS=8
 # LLM-related params
 LR=1e-5
 LVR_HEAD=False
+USE_BOTTLENECK=False   # Branch 2: set True to train the bottleneck arm (block answer->image attention)
 
 # LVR-related params
 LVR_LOSS_FCT=mse
@@ -63,6 +64,7 @@ deepspeed src/train/train_lvr.py \
     --bf16 True \
     --fp16 False \
     --disable_flash_attn2 True \
+    --use_bottleneck $USE_BOTTLENECK \
     --online_checkpoint $ONLINE \
     --output_dir "$OUTPUT_DIR" \
     --num_train_epochs 1 \
