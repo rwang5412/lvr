@@ -121,10 +121,14 @@ def main():
                     help="mediator (latent) corruption for NIE. mean = replace with dataset-mean latent.")
     ap.add_argument("--limit", type=int, default=None, help="cap number of held-out examples")
     ap.add_argument("--skip-flip", action="store_true", help="skip directed flip-to-target")
+    ap.add_argument("--use-bottleneck", action="store_true",
+                    help="Branch 2: evaluate with the answer->image bottleneck mask active")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model, processor, config = load_model_and_processor(args.checkpoint)
+    model.config.use_bottleneck = args.use_bottleneck   # Branch 2: match the eval'd checkpoint's regime
+    print(f"[harness] use_bottleneck={args.use_bottleneck}")
     image_token_id, lvr_id = config.image_token_id, config.lvr_id
     lvr_start_id, lvr_end_id = config.lvr_start_id, config.lvr_end_id
 

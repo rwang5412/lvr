@@ -119,6 +119,47 @@ def  set_lvr_loss_fct(loss_lvr_fct: str):
     else:
         raise ValueError(f"Unsupported lvr_loss: {loss_lvr_fct}")
 
+
+def build_bottleneck_mask(input_ids, attention_mask_2d, image_token_id, lvr_id, dtype):
+    """BOTTLENECK (Branch 2): a 4D additive attention mask that blocks ANSWER positions from attending
+    to IMAGE positions, so the answer must route through the latent tokens.
+
+    SDPA consumes a 4D mask as the COMPLETE mask, so this carries all three components:
+      1. causal   — min above the diagonal (key > query), 0 on/below.
+      2. padding  — min on key columns where the 2D attention_mask marks pad (==0).
+      3. bottleneck — min on (answer-row, image-col) entries.
+
+    Segments come from input_ids alone (no labels): image cols = (input_ids == image_token_id);
+    answer rows = every position AFTER the last <lvr> token. Kept open: latent->image (latent rows
+    untouched), answer->latent / question / prior-answer (only image cols are blocked, only for
+    answer rows). Uses torch.finfo(dtype).min (not -inf) to avoid softmax NaN on fully-masked rows.
+    Returns [B, 1, L, L].
+    """
+    B, L = input_ids.shape
+    device = input_ids.device
+    min_val = torch.finfo(dtype).min
+
+    # causal
+    causal = torch.triu(torch.full((L, L), min_val, dtype=dtype, device=device), diagonal=1)
+    mask = causal.unsqueeze(0).unsqueeze(0).expand(B, 1, L, L).clone()  # [B, 1, L, L]
+
+    # padding
+    if attention_mask_2d is not None:
+        pad = attention_mask_2d == 0                                    # [B, L]
+        mask.masked_fill_(pad[:, None, None, :], min_val)
+
+    # bottleneck (per example)
+    positions = torch.arange(L, device=device)
+    for b in range(B):
+        img_cols = input_ids[b] == image_token_id                      # [L]
+        lat = (input_ids[b] == lvr_id).nonzero(as_tuple=True)[0]
+        if lat.numel() == 0:
+            continue                                                   # no latents -> nothing to block
+        answer_rows = positions > int(lat.max())                       # [L] everything after last <lvr>
+        block = answer_rows[:, None] & img_cols[None, :]               # [L, L]
+        mask[b, 0].masked_fill_(block, min_val)
+    return mask
+
 '''
     Coconut mode
     No LVR Head
@@ -300,10 +341,26 @@ def qwen2_5_mixed_modality_forward_lvr(
     if override_latent_embeds is not None and lvr_tokens is not None:
         inputs_embeds[batch_indices, seq_positions] = override_latent_embeds.to(inputs_embeds.dtype)
 
+    # BOTTLENECK (Branch 2): opt-in. When off (default), the existing 2D mask flows through unchanged.
+    # When on, swap ONLY this call's attention_mask for the 4D answer->image bottleneck mask. rope was
+    # already computed above from the 2D mask, so this doesn't disturb get_rope_index.
+    lm_attention_mask = attention_mask
+    if getattr(self.config, "use_bottleneck", False) and input_ids is not None:
+        # We hand-build the COMPLETE 4D mask, so we must reproduce every masking the model applies.
+        # Sliding-window attention would be silently dropped by our mask — fail fast if it's on.
+        if getattr(self.config, "use_sliding_window", False):
+            raise NotImplementedError(
+                "use_bottleneck: build_bottleneck_mask does not implement sliding-window attention "
+                "(config.use_sliding_window is True). Extend the mask before using the bottleneck here."
+            )
+        lm_attention_mask = build_bottleneck_mask(
+            input_ids, attention_mask, self.config.image_token_id, self.config.lvr_id, inputs_embeds.dtype
+        )
+
     outputs = self.model.language_model(
             input_ids=None,
             position_ids=position_ids,
-            attention_mask=attention_mask,
+            attention_mask=lm_attention_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=use_cache,
