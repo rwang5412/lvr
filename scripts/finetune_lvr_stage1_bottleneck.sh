@@ -47,7 +47,7 @@ MIN_TOKEN=128
 
 RUN_NAME="Step1_bottleneck_${MAX_STEPS}steps_${LVR_LOSS_FCT}Lambda${LAMBDA_LVR}"
 ONLINE=False
-OUTPUT_DIR="stage1_bottleneck_checkpoints/"
+OUTPUT_DIR="/scratch/haizhow/stage1_bottleneck_checkpoints/"   # SCRATCH: 7B checkpoints are big; home quota would fill
 
 source $(conda info --base)/etc/profile.d/conda.sh
 conda activate train
