@@ -22,9 +22,11 @@ each token is a ~28px cell; the merged grid is (Hgrid//2, Wgrid//2).
 """
 
 import argparse
+import os
 
 import torch
 import torch.nn.functional as F
+from PIL import Image, ImageDraw
 
 from evaluation.run_harness import load_model_and_processor, _forward, _to_device
 from src.params import DataArguments
@@ -128,6 +130,45 @@ def latent_attention_flow(model, batch, config, layers=None):
             "latents": rows, "flow": flow}                      # flow: [n_lat, n_img] full heatmap
 
 
+# --------------------------------------------------------------------------------- rendering ------
+
+def _center_inside(box, bbox):
+    """Is the center of a normalized box inside the normalized bbox [x1,y1,x2,y2]?"""
+    cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    return bbox[0] <= cx <= bbox[2] and bbox[1] <= cy <= bbox[3]
+
+
+def _px(box, W, H):
+    return [box[0] * W, box[1] * H, box[2] * W, box[3] * H]
+
+
+def render_nearest(near, record, image_folder, out_path):
+    """Draw, on the original image: the GT bbox (yellow), the supervised-target patch cells (red),
+    and each latent's NEAREST patch as a numbered blue box. Returns how many nearest boxes fall
+    inside the bbox. Mirrors the 'top/GT (N inside bbox)' panel.
+    """
+    img = Image.open(os.path.join(image_folder, record["image"][0])).convert("RGB")
+    W, H = img.size
+    draw = ImageDraw.Draw(img)
+    bbox = record["bboxes"][0]  # normalized [x1,y1,x2,y2]
+
+    # GT bbox (yellow)
+    draw.rectangle(_px(bbox, W, H), outline=(255, 220, 0), width=4)
+    # supervised-target patch cells (thin red) — the "GT cells"
+    for r in near["latents"]:
+        draw.rectangle(_px(r["target_box"], W, H), outline=(230, 40, 40), width=1)
+    # each latent's nearest patch (blue) + latent index label
+    inside = 0
+    for r in near["latents"]:
+        b = _px(r["nearest_box"], W, H)
+        draw.rectangle(b, outline=(30, 120, 255), width=3)
+        draw.text((b[0] + 2, b[1] + 1), str(r["latent"]), fill=(30, 120, 255))
+        inside += _center_inside(r["nearest_box"], bbox)
+
+    img.save(out_path)
+    return inside, len(near["latents"])
+
+
 # ------------------------------------------------------------------------------------- main --------
 
 def main():
@@ -137,6 +178,7 @@ def main():
     ap.add_argument("--heldout", default="data/lvr_data/heldout_harness.json")
     ap.add_argument("--index", type=int, default=0, help="which held-out example to inspect")
     ap.add_argument("--attention", action="store_true", help="also run #3 (needs a short example)")
+    ap.add_argument("--save", help="path to save the annotated image (numbered nearest-patch boxes)")
     args = ap.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -154,6 +196,10 @@ def main():
         print(f"  latent {r['latent']:2d}: nearest={r['nearest_patch']:4d} cos={r['nearest_cos']:.3f} "
               f"target={r['target_patch']:4d} cos_to_target={r['cos_to_target']:.3f} "
               f"{'HIT' if r['hits_target'] else '   '}  nearest_box={[round(x,3) for x in r['nearest_box']]}")
+
+    if args.save:
+        inside, n = render_nearest(near, records[args.index], args.image_folder, args.save)
+        print(f"[render] {inside}/{n} nearest patches inside bbox -> saved {args.save}")
 
     if args.attention:
         flow = latent_attention_flow(model, batch, config)
