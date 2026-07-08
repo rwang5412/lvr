@@ -14,7 +14,7 @@
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=200G
+#SBATCH --mem=360G   # 7B ZeRO-3 full CPU offload (params+optimizer via cpu_adam) needs ~300G; 200G OOMs
 #SBATCH --time=12:00:00
 #SBATCH --gpus=a100:4
 #SBATCH --output=/scratch/haizhow/logs/train_distill_%j.out
