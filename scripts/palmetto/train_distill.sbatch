@@ -16,7 +16,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=12:00:00
-#SBATCH --gpus=a100:8
+#SBATCH --gpus=a100:4
 #SBATCH --output=/scratch/haizhow/logs/train_distill_%j.out
 #SBATCH --error=/scratch/haizhow/logs/train_distill_%j.err
 
@@ -29,9 +29,9 @@ ENV_NAME="${ENV_NAME:-train}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}"
 CHECKPOINT_NAME="${CHECKPOINT_NAME:-/home/haizhow/lvr/weights/LVR-7B}"   # base LVR ckpt (continue-FT init)
 DATA_PATH="${DATA_PATH:-data/meta_data_bottleneck_slice.json}"           # meta -> slice_train.json + image root
-OUTPUT_DIR="${OUTPUT_DIR:-/scratch/haizhow/stage1_distill_checkpoints/}"
-MAX_STEPS="${MAX_STEPS:-417}"                                            # MATCH train_bottleneck for comparability
-NUM_DEVICES="${NUM_DEVICES:-8}"                                          # MATCH train_bottleneck for comparability
+OUTPUT_DIR="${OUTPUT_DIR:-/scratch/haizhow/stage1_arms/distill/}"        # both arms live under stage1_arms/
+MAX_STEPS="${MAX_STEPS:-833}"                                            # MATCH train_bottleneck (1 epoch @ 4 GPU on 80k)
+NUM_DEVICES="${NUM_DEVICES:-4}"                                          # MATCH train_bottleneck for comparability
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-8}"                                # global batch = 1 * NUM_DEVICES * GRAD_ACCUM
 LR="${LR:-1e-5}"
 LAMBDA_LVR="${LAMBDA_LVR:-0.1}"
