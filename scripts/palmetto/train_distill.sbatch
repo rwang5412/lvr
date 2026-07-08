@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Step-1 distill SFT (continue-FT from the LVR base, USE_BOTTLENECK=True + self-distillation KL).
-# IDENTICAL to train_bottleneck.sbatch except: --distill_weight 0.5 and its own $OUTPUT_DIR.
+# IDENTICAL to train_bottleneck.sbatch except: --distill_weight 1.0 and its own $OUTPUT_DIR.
 # Run both with the SAME MAX_STEPS / NUM_DEVICES so the two arms see the same data (comparable).
 # Checkpoints -> $OUTPUT_DIR (scratch). Job log: /scratch/haizhow/logs/train_distill_%j.out
 #
@@ -8,7 +8,7 @@
 #   mkdir -p /scratch/haizhow/logs            # once
 #   sbatch scripts/palmetto/train_distill.sbatch
 #   # override step count / slice / distill weight:
-#   sbatch --export=ALL,MAX_STEPS=417,DISTILL_WEIGHT=0.5 scripts/palmetto/train_distill.sbatch
+#   sbatch --export=ALL,MAX_STEPS=833,DISTILL_WEIGHT=1.0 scripts/palmetto/train_distill.sbatch
 #
 #SBATCH --job-name=lvr-distill-ft
 #SBATCH --nodes=1
@@ -35,7 +35,7 @@ NUM_DEVICES="${NUM_DEVICES:-4}"                                          # MATCH
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-8}"                                # global batch = 1 * NUM_DEVICES * GRAD_ACCUM
 LR="${LR:-1e-5}"
 LAMBDA_LVR="${LAMBDA_LVR:-0.1}"
-DISTILL_WEIGHT="${DISTILL_WEIGHT:-0.5}"                                  # the ONLY knob vs the bottleneck arm
+DISTILL_WEIGHT="${DISTILL_WEIGHT:-1.0}"                                  # the ONLY knob vs the bottleneck arm
 LST="${LST:-4096}"
 MAX_INSTANCE_PER_BATCH="${MAX_INSTANCE_PER_BATCH:-4}"
 
