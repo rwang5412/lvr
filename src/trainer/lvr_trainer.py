@@ -34,10 +34,11 @@ class QwenLVRSFTTrainer(Trainer):
 
     def __init__(self, *args, temp_folder=None, oci_handler=None, **kwargs):
         super(QwenLVRSFTTrainer, self).__init__(*args, **kwargs)
-        # if online checkpointing
-        if oci_handler:
-            self.oci_handler = oci_handler
-            self.temp_folder = temp_folder     # temp_file class; "/dockerx/Local/users/bangzheng/model_name/run_name-[random]"
+        # Always define these: _save_checkpoint reads self.temp_folder unconditionally to decide
+        # whether to upload to OCI. Offline runs (online_checkpoint=False) pass oci_handler=None,
+        # so temp_folder=None -> the `if self.temp_folder` check is False -> local save only.
+        self.oci_handler = oci_handler
+        self.temp_folder = temp_folder     # temp_file class; "/dockerx/Local/users/bangzheng/model_name/run_name-[random]"
 
     def create_optimizer(self):
         """
