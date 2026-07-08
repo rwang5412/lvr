@@ -27,6 +27,7 @@ class TrainingArguments(HFTrainingArguments):
 
     loss_lvr_fct: str = field(default="mse")
     loss_lvr_lambda: float = field(default=1e-1)
+    distill_weight: float = field(default=0.0)  # self-distillation KL: 0 disables (skips teacher pass); >0 requires use_bottleneck=True
 
     freeze_vision_tower: bool = field(default=False)
     freeze_llm: bool = field(default=False)

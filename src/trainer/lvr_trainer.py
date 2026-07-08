@@ -2,6 +2,7 @@ import os
 import torch
 import torch.nn as nn
 import wandb
+from src.train.distill_loss import distill_kl_over_answer
 from transformers import Trainer
 from transformers.trainer import (
     is_sagemaker_mp_enabled,
@@ -231,16 +232,39 @@ class QwenLVRSFTTrainer(Trainer):
             "batch_size": batch_size,
             "tokens_per_device": total_tokens,})
 
+        # STUDENT pass (respects config.use_bottleneck; = existing behavior)
         outputs = model(**inputs)
         # loss = outputs.loss  # total loss
         loss_ce = outputs.loss_ce
         loss_lvr = outputs.loss_lvr
         loss_mode_switch = outputs.loss_mode_switch
 
+        # Self-distillation KL (forward KL, teacher||student) over the answer span. distill_weight=0
+        # skips the teacher pass entirely -> loss/logging identical to Step 1 (bottleneck-only).
+        loss_kl = None
+        if self.args.distill_weight > 0:
+            if not getattr(self.model.config, "use_bottleneck", False):
+                raise ValueError(
+                    "distill_weight > 0 requires use_bottleneck=True: the student pass must be "
+                    "bottleneck-on, else student==teacher and the KL is a silent no-op."
+                )
+            # TEACHER pass: full context (bottleneck off), no grad. Restore the flag after.
+            orig_bn = self.model.config.use_bottleneck
+            with torch.no_grad():
+                self.model.config.use_bottleneck = False
+                teacher_outputs = model(**inputs)
+            self.model.config.use_bottleneck = orig_bn
+            loss_kl = distill_kl_over_answer(
+                outputs.logits, teacher_outputs.logits,
+                inputs["input_ids"], inputs["labels"], self.model.config,
+            )
+
         if self.args.mode_switch_loss:
             loss = loss_ce + self.args.loss_lvr_lambda * loss_lvr + self.args.loss_mode_switch_lambda * loss_mode_switch
         else:
             loss = loss_ce + self.args.loss_lvr_lambda * loss_lvr if self.args.loss_lvr_lambda > 0 else loss_ce
+        if loss_kl is not None:
+            loss = loss + self.args.distill_weight * loss_kl
 
         # Log each component
         self.log({
@@ -248,6 +272,7 @@ class QwenLVRSFTTrainer(Trainer):
             "loss_ce": loss_ce.detach().item(),
             "loss_lvr": loss_lvr.detach().item() if loss_lvr is not None else 0.0,
             "loss_mode_switch": loss_mode_switch.detach().item() if loss_mode_switch is not None else 0.0,
+            "loss_kl": loss_kl.detach().item() if loss_kl is not None else 0.0,
         })
 
 
