@@ -241,6 +241,9 @@ def main():
         M_i = (nll_latent_corrupt[i] - nll_clean[i]) if nll_latent_corrupt[i] is not None else None
         per_example.append({
             "idx": i,
+            "question_id": records[i].get("question_id"),
+            "dataset": records[i].get("dataset"),
+            "split": records[i].get("split"),
             "question": _qtext(records[i]),
             "answer": _atext(records[i]),
             "image": records[i]["image"][0],
@@ -348,10 +351,10 @@ def _render(report: dict) -> str:
         lo = sorted(pe, key=lambda e: e["image_effect_T"])[:5]
         lines.append("-- highest image effect (answer needs the image most) --")
         for e in hi:
-            lines.append(f"  T={e['image_effect_T']:+.3f}  ans={e['answer'][:22]!r}  Q: {e['question'][:66]}")
+            lines.append(f"  T={e['image_effect_T']:+.3f}  qid={e['question_id']}  ans={e['answer'][:22]!r}  Q: {e['question'][:60]}")
         lines.append("-- lowest image effect (prior-answerable / image barely matters) --")
         for e in lo:
-            lines.append(f"  T={e['image_effect_T']:+.3f}  ans={e['answer'][:22]!r}  Q: {e['question'][:66]}")
+            lines.append(f"  T={e['image_effect_T']:+.3f}  qid={e['question_id']}  ans={e['answer'][:22]!r}  Q: {e['question'][:60]}")
 
     if "directed_flip" in report:
         d = report["directed_flip"]
