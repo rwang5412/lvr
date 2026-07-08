@@ -117,8 +117,9 @@ def train():
     config.lvr_head = model_args.lvr_head
     config.lvr_head_type = model_args.lvr_head_type
     
-    # Load model based on model type
-    if "Qwen2.5" in model_args.model_id:
+    # Load model based on model type. Detect via model_id OR the loaded config's model_type, so a
+    # local checkpoint path (e.g. weights/LVR-7B) that doesn't contain "Qwen2.5" is still recognized.
+    if "Qwen2.5" in model_args.model_id or "qwen2_5" in getattr(config, "model_type", "").lower():
         # Patch the forward function
         replace_qwen2_5_with_mixed_modality_forward_lvr(coconut=model_args.coconut,
                                                         lvr_head=model_args.lvr_head,
@@ -146,7 +147,7 @@ def train():
         replace_qwen_2_5_vl_patch_emb()
 
     else:
-        raise("Unsupported model type. At this moment, we only support Qwen2.5LM-based Qwen2.5VL series and InternVL3 series.")
+        raise ValueError("Unsupported model type. At this moment, we only support Qwen2.5LM-based Qwen2.5VL series and InternVL3 series.")
 
     model.config.use_cache = False
     model_to_configure = model
