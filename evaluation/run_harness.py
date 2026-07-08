@@ -27,6 +27,7 @@ Usage:
 import argparse
 import json
 import os
+import re
 
 import torch
 
@@ -219,6 +220,35 @@ def main():
     }
     probe = {"r2_latent_to_roi": metrics.linear_probe_r2(Z_cat, T_cat)}
 
+    # -------- per-example image effect (T) + question, for inspection --------
+    def _qtext(r):
+        for c in r["conversations"]:
+            if c["from"] == "human":
+                v = c["value"]
+                return (v.split("\n", 1)[-1] if v.startswith("<image>") else v).strip()
+        return ""
+
+    def _atext(r):
+        for c in r["conversations"]:
+            if c["from"] == "gpt":
+                mm = re.search(r"<answer>(.*?)</answer>", c["value"], re.S)
+                return mm.group(1).strip() if mm else ""
+        return ""
+
+    per_example = []
+    for i in range(n):
+        T_i = nll_image_corrupt[i] - nll_clean[i]
+        M_i = (nll_latent_corrupt[i] - nll_clean[i]) if nll_latent_corrupt[i] is not None else None
+        per_example.append({
+            "idx": i,
+            "question": _qtext(records[i]),
+            "answer": _atext(records[i]),
+            "image": records[i]["image"][0],
+            "clean_nll": round(nll_clean[i], 4),
+            "image_effect_T": round(T_i, 4),
+            "latent_effect_M": round(M_i, 4) if M_i is not None else None,
+        })
+
     report = {
         "checkpoint": args.checkpoint,
         "n_examples": n,
@@ -228,6 +258,7 @@ def main():
         "latent_diversity": latent_div,
         "target_diversity_ref": target_div,
         "linear_probe": probe,
+        "per_example": per_example,
     }
 
     # -------- Directed flip-to-target (post-gating metric) --------
@@ -311,6 +342,17 @@ def _render(report: dict) -> str:
         f"avg pairwise cosine distance : {ld['avg_pairwise_cosine_distance']:.4f}",
         f"linear probe R² (Z→ROI)      : {report['linear_probe']['r2_latent_to_roi']:.4f}",
     ]
+    if report.get("per_example"):
+        pe = [e for e in report["per_example"] if e["image_effect_T"] is not None]
+        hi = sorted(pe, key=lambda e: -e["image_effect_T"])[:5]
+        lo = sorted(pe, key=lambda e: e["image_effect_T"])[:5]
+        lines.append("-- highest image effect (answer needs the image most) --")
+        for e in hi:
+            lines.append(f"  T={e['image_effect_T']:+.3f}  ans={e['answer'][:22]!r}  Q: {e['question'][:66]}")
+        lines.append("-- lowest image effect (prior-answerable / image barely matters) --")
+        for e in lo:
+            lines.append(f"  T={e['image_effect_T']:+.3f}  ans={e['answer'][:22]!r}  Q: {e['question'][:66]}")
+
     if "directed_flip" in report:
         d = report["directed_flip"]
         lines += [
