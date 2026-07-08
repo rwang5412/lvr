@@ -24,14 +24,14 @@ Two subcommands:
 
 Deterministic: same --seed -> same draw. Key = (dataset, split, question_id) (verified unique).
 
-    # once:
-    python evaluation/make_slice.py heldout --source data/lvr_data/viscot_363k_lvr_formatted.json \
-        --heldout-n 300 --seed 1234 --base-train-ids <BASE_TRAIN_IDS.json> \
-        --out data/lvr_data/slice_heldout.json
-    # per training draw (vary --seed for stability):
+    # once — CLEAN held-out from the VAL split (unseen by the base; no contamination guard needed):
+    python evaluation/make_slice.py heldout --source data/lvr_data/viscot_gqa_val_lvr.json \
+        --heldout-n 300 --seed 1234 --out data/lvr_data/heldout_val_clean.json
+    # training slice — diverse, multi-source, TRAIN split. Held-out is the val split, so it's
+    # disjoint by construction and --heldout-in is unnecessary. ~80k x1 epoch ~= 300-450 steps:
     python evaluation/make_slice.py train --source data/lvr_data/viscot_363k_lvr_formatted.json \
-        --n 4000 --seed 1234 --heldout-in data/lvr_data/slice_heldout.json \
-        --out data/lvr_data/slice_train_seed1234.json
+        --n 80000 --epochs 1 --seed 1234 --out data/lvr_data/slice_train.json
+    # (the train command prints an ESTIMATED-STEPS block; keep total steps in the ~200-450 band)
 """
 
 import argparse
@@ -184,21 +184,52 @@ def cmd_heldout(args):
     print(f"[heldout] wrote ids            -> {ids_out}")
 
 
+def _report_steps(n, epochs, global_batch, pack_factor):
+    """Estimate optimizer steps for the continue-FT reroute and flag under/over-training.
+
+    Packing decouples example-count from steps: ~global_batch * pack_factor instances land per
+    optimizer step, so a 'few thousand, 1 epoch' run can be ~15 steps -> the reroute never develops
+    and you get a false 'no effect'. Target ~200-450 steps for the bottleneck adaptation."""
+    inst_per_step = global_batch * pack_factor
+    steps_per_epoch = n / inst_per_step
+    total = steps_per_epoch * epochs
+    print(f"\n  ESTIMATED TRAINING STEPS  (the knob that governs whether the reroute develops)")
+    print(f"    global_batch={global_batch} x pack_factor={pack_factor} -> ~{inst_per_step:.0f} instances/step")
+    print(f"    {n} rows x {epochs} epoch(s) -> ~{steps_per_epoch:.0f} steps/epoch -> ~{total:.0f} TOTAL steps")
+    if total < 200:
+        print(f"    !! UNDERTRAINED: ~{total:.0f} < 200 steps. The reroute may not develop -> false 'no effect'.")
+        print(f"       Fix: raise --n or --epochs to reach ~200-450 steps.")
+    elif epochs > 2 and n < 20000:
+        print(f"    !! OVERFIT risk: {epochs} epochs on a small slice ({n}) memorizes the slice -> corrupts the")
+        print(f"       causal signal. Prefer a bigger slice at 1 epoch.")
+    elif total > 800:
+        print(f"    note: ~{total:.0f} steps exceeds the ~200-450 reroute band — fine, just longer than needed.")
+    else:
+        print(f"    OK: ~{total:.0f} steps is in the ~200-450 reroute target band.")
+    print(f"    -> in the FT script set MAX_STEPS~={round(total)}  (or num_train_epochs={epochs}, MAX_STEPS=-1).")
+
+
 def cmd_train(args):
     records = json.load(open(args.source))
-    held_ids = {tuple(k) for k in json.load(open(args.heldout_in.replace(".json", "_ids.json")))}
-    print(f"[train] loaded {len(records)} records; held-out to exclude: {len(held_ids)}")
+    if args.heldout_in:
+        held_ids = {tuple(k) for k in json.load(open(args.heldout_in.replace(".json", "_ids.json")))}
+        print(f"[train] loaded {len(records)} records; held-out to exclude: {len(held_ids)}")
+        pool = [r for r in records if _key(r) not in held_ids]
+    else:
+        held_ids = set()
+        print(f"[train] loaded {len(records)} records; no --heldout-in given — train/val disjointness "
+              f"relies on the split field (OK when the held-out is the val split).")
+        pool = records
 
-    pool = [r for r in records if _key(r) not in held_ids]
     subset = _stratified_draw(pool, args.n, args.seed)
     print(f"[train] drew {len(subset)} stratified training rows (seed={args.seed})")
 
-    # fail-fast: eval must never appear in train
-    sub_keys = {_key(r) for r in subset}
-    leak = sub_keys & held_ids
-    if leak:
-        raise SystemExit(f"[train] FAIL: {len(leak)} training rows overlap the held-out set — leak.")
-    print(f"[train] OK: training slice disjoint from held-out")
+    # fail-fast: eval must never appear in train (only checkable if an id-set was given)
+    if held_ids:
+        leak = {_key(r) for r in subset} & held_ids
+        if leak:
+            raise SystemExit(f"[train] FAIL: {len(leak)} training rows overlap the held-out set — leak.")
+        print(f"[train] OK: training slice disjoint from held-out")
 
     # representativeness: source matches by construction; the claim to validate is source->attr-type
     _print_dist_compare("SOURCE (sanity)", records, subset, lambda r: r.get("dataset"))
@@ -206,6 +237,8 @@ def cmd_train(args):
     if worst > args.tol:
         print(f"  NOTE: attr-type max|Δpp|={worst:.1f} > tol={args.tol} — source is a weaker attr-type "
               f"proxy than hoped at this size; grow --n or eyeball which type skews.")
+
+    _report_steps(len(subset), args.epochs, args.global_batch, args.pack_factor)
 
     json.dump(subset, open(args.out, "w"), ensure_ascii=False)
     print(f"\n[train] wrote {len(subset)} rows -> {args.out}")
@@ -225,11 +258,20 @@ def main():
     h.set_defaults(func=cmd_heldout)
 
     t = sub.add_parser("train")
-    t.add_argument("--source", default="data/lvr_data/viscot_363k_lvr_formatted.json")
-    t.add_argument("--n", type=int, default=4000)
+    t.add_argument("--source", default="data/lvr_data/viscot_363k_lvr_formatted.json",
+                   help="TRAIN-split data to slice (diverse, multi-source)")
+    t.add_argument("--n", type=int, default=80000,
+                   help="training subset size. ~80k (20%% of 363k) x1 epoch ~= 300-450 steps (reroute target)")
     t.add_argument("--seed", type=int, default=1234)
-    t.add_argument("--heldout-in", default="data/lvr_data/slice_heldout.json")
+    t.add_argument("--heldout-in", default=None,
+                   help="held-out ids to EXCLUDE. Optional: when the held-out is the VAL split, "
+                        "train/val are disjoint by split and this isn't needed.")
     t.add_argument("--tol", type=float, default=3.0, help="max |Δpp| tolerance for attr-type match")
+    t.add_argument("--epochs", type=int, default=1, help="epochs — feeds the step estimate + the FT script")
+    t.add_argument("--global-batch", type=int, default=64,
+                   help="batch_per_device * num_devices * grad_accum (Stage-1 7B default = 1*8*8 = 64)")
+    t.add_argument("--pack-factor", type=float, default=3.0,
+                   help="avg instances packed per batch element (1=no packing, ~3-4 for short VQA)")
     t.add_argument("--out", default="data/lvr_data/slice_train.json")
     t.set_defaults(func=cmd_train)
 
