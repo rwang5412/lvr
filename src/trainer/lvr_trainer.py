@@ -249,10 +249,14 @@ class QwenLVRSFTTrainer(Trainer):
                     "bottleneck-on, else student==teacher and the KL is a silent no-op."
                 )
             # TEACHER pass: full context (bottleneck off), no grad. Restore the flag after.
+            # Drop `labels` so the forward's `if labels is not None` block is skipped: no throwaway
+            # cross-entropy (~6.7 GiB) and no fp32 upcast of the full [L,vocab] logits (~10 GiB).
+            # We only need the teacher's logits (still returned) for the KL. This is the OOM fix.
+            teacher_inputs = {k: v for k, v in inputs.items() if k != "labels"}
             orig_bn = self.model.config.use_bottleneck
             with torch.no_grad():
                 self.model.config.use_bottleneck = False
-                teacher_outputs = model(**inputs)
+                teacher_outputs = model(**teacher_inputs)
             self.model.config.use_bottleneck = orig_bn
             loss_kl = distill_kl_over_answer(
                 outputs.logits, teacher_outputs.logits,

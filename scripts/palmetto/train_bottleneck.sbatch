@@ -41,6 +41,7 @@ export WANDB_PROJECT="${WANDB_PROJECT:-LVR-7B-Step1-Bottleneck}"
 export WANDB_MODE="${WANDB_MODE:-offline}"        # compute nodes have no internet
 export HF_HOME="${CACHE_ROOT}/huggingface"
 export PYTHONNOUSERSITE=1
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"   # reduce fragmentation on long packed seqs
 
 [[ -z "${SLURM_JOB_ID:-}" && "${ALLOW_LOCAL:-0}" != "1" ]] && { echo "ERROR: use sbatch (or ALLOW_LOCAL=1)"; exit 1; }
 [[ -d "$PROJECT_ROOT" ]] || { echo "ERROR: PROJECT_ROOT missing: $PROJECT_ROOT"; exit 1; }
