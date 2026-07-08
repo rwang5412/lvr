@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
-# Step-1 bottleneck SFT (continue-FT from the LVR base, USE_BOTTLENECK=True, existing losses only).
-# Checkpoints -> $OUTPUT_DIR (scratch). Job log: /scratch/haizhow/logs/train_bottleneck_%j.out
+# Step-1 distill SFT (continue-FT from the LVR base, USE_BOTTLENECK=True + self-distillation KL).
+# IDENTICAL to train_bottleneck.sbatch except: --distill_weight 0.5 and its own $OUTPUT_DIR.
+# Run both with the SAME MAX_STEPS / NUM_DEVICES so the two arms see the same data (comparable).
+# Checkpoints -> $OUTPUT_DIR (scratch). Job log: /scratch/haizhow/logs/train_distill_%j.out
 #
 # Usage:
 #   mkdir -p /scratch/haizhow/logs            # once
-#   sbatch scripts/palmetto/train_bottleneck.sbatch
-#   # override step count / slice:
-#   sbatch --export=ALL,MAX_STEPS=300,DATA_PATH=data/meta_data_bottleneck_slice.json \
-#          scripts/palmetto/train_bottleneck.sbatch
+#   sbatch scripts/palmetto/train_distill.sbatch
+#   # override step count / slice / distill weight:
+#   sbatch --export=ALL,MAX_STEPS=417,DISTILL_WEIGHT=0.5 scripts/palmetto/train_distill.sbatch
 #
-#SBATCH --job-name=lvr-bottleneck-ft
+#SBATCH --job-name=lvr-distill-ft
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
 #SBATCH --time=12:00:00
 #SBATCH --gpus=a100:8
-#SBATCH --output=/scratch/haizhow/logs/train_bottleneck_%j.out
-#SBATCH --error=/scratch/haizhow/logs/train_bottleneck_%j.err
+#SBATCH --output=/scratch/haizhow/logs/train_distill_%j.out
+#SBATCH --error=/scratch/haizhow/logs/train_distill_%j.err
 
 set -euo pipefail
 
@@ -28,16 +29,17 @@ ENV_NAME="${ENV_NAME:-train}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}"
 CHECKPOINT_NAME="${CHECKPOINT_NAME:-/home/haizhow/lvr/weights/LVR-7B}"   # base LVR ckpt (continue-FT init)
 DATA_PATH="${DATA_PATH:-data/meta_data_bottleneck_slice.json}"           # meta -> slice_train.json + image root
-OUTPUT_DIR="${OUTPUT_DIR:-/scratch/haizhow/stage1_bottleneck_checkpoints/}"
-MAX_STEPS="${MAX_STEPS:-417}"                                            # from make_slice's step estimate
-NUM_DEVICES="${NUM_DEVICES:-8}"
+OUTPUT_DIR="${OUTPUT_DIR:-/scratch/haizhow/stage1_distill_checkpoints/}"
+MAX_STEPS="${MAX_STEPS:-417}"                                            # MATCH train_bottleneck for comparability
+NUM_DEVICES="${NUM_DEVICES:-8}"                                          # MATCH train_bottleneck for comparability
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-8}"                                # global batch = 1 * NUM_DEVICES * GRAD_ACCUM
 LR="${LR:-1e-5}"
 LAMBDA_LVR="${LAMBDA_LVR:-0.1}"
+DISTILL_WEIGHT="${DISTILL_WEIGHT:-0.5}"                                  # the ONLY knob vs the bottleneck arm
 LST="${LST:-4096}"
 MAX_INSTANCE_PER_BATCH="${MAX_INSTANCE_PER_BATCH:-4}"
 
-export WANDB_PROJECT="${WANDB_PROJECT:-LVR-7B-Step1-Bottleneck}"
+export WANDB_PROJECT="${WANDB_PROJECT:-LVR-7B-Step1-Distill}"
 export WANDB_MODE="${WANDB_MODE:-offline}"        # compute nodes have no internet
 export HF_HOME="${CACHE_ROOT}/huggingface"
 export PYTHONNOUSERSITE=1
@@ -55,9 +57,9 @@ cd "$PROJECT_ROOT"
 # BOTH paths: code mixes `from src.X` (needs root) and `from train.X` (needs root/src).
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src:${PYTHONPATH:-}"
 
-echo "=== bottleneck FT ===  init=$CHECKPOINT_NAME  data=$DATA_PATH  max_steps=$MAX_STEPS  gpus=$NUM_DEVICES  out=$OUTPUT_DIR"
+echo "=== distill FT ===  init=$CHECKPOINT_NAME  data=$DATA_PATH  max_steps=$MAX_STEPS  gpus=$NUM_DEVICES  distill_weight=$DISTILL_WEIGHT  out=$OUTPUT_DIR"
 deepspeed --num_gpus "$NUM_DEVICES" src/train/train_lvr.py \
-    --run_name "Step1_bottleneck_${MAX_STEPS}steps" \
+    --run_name "Step1_distill_w${DISTILL_WEIGHT}_${MAX_STEPS}steps" \
     --checkpoint_name "$CHECKPOINT_NAME" \
     --coconut True \
     --loss_lvr_fct mse \
@@ -75,6 +77,7 @@ deepspeed --num_gpus "$NUM_DEVICES" src/train/train_lvr.py \
     --bf16 True --fp16 False \
     --disable_flash_attn2 True \
     --use_bottleneck True \
+    --distill_weight "$DISTILL_WEIGHT" \
     --online_checkpoint False \
     --output_dir "$OUTPUT_DIR" \
     --num_train_epochs 1 \
