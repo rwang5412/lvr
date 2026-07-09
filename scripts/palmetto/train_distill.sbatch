@@ -58,13 +58,15 @@ cd "$PROJECT_ROOT"
 # BOTH paths: code mixes `from src.X` (needs root) and `from train.X` (needs root/src).
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src:${PYTHONPATH:-}"
 
-# cpu_adam is JIT-compiled at startup. With 4 ranks the concurrent ninja builds race and one rank
-# fails ("Error building extension 'cpu_adam'"). Use a per-job, NODE-LOCAL cache (correct -march=native
-# for this node; no stale/wrong-arch reuse) and PRE-BUILD single-process so the ranks only load the .so.
-export TORCH_EXTENSIONS_DIR="/tmp/torch_ext_${SLURM_JOB_ID:-$$}"
+# cpu_adam is JIT-compiled at startup; 4 ranks racing to build it into one dir corrupts the build.
+# PRE-BUILD it ONCE, single-process, into a PER-JOB dir under $HOME (exec-able + proven to build here;
+# /tmp on the compute nodes fails the build -> "No such file" .so). Own line (NOT `&&`) so a build
+# failure trips `set -e` and aborts with a clear error instead of proceeding to a broken 4-rank launch.
+export TORCH_EXTENSIONS_DIR="$HOME/.cache/torch_ext_${SLURM_JOB_ID:-$$}"
 mkdir -p "$TORCH_EXTENSIONS_DIR"
 echo "[prebuild] compiling cpu_adam single-process into $TORCH_EXTENSIONS_DIR ..."
-python -c "from deepspeed.ops.op_builder import CPUAdamBuilder; CPUAdamBuilder().load()" && echo "[prebuild] cpu_adam OK"
+python -c "from deepspeed.ops.op_builder import CPUAdamBuilder; CPUAdamBuilder().load()"
+echo "[prebuild] cpu_adam OK"
 
 echo "=== distill FT ===  init=$CHECKPOINT_NAME  data=$DATA_PATH  max_steps=$MAX_STEPS  gpus=$NUM_DEVICES  distill_weight=$DISTILL_WEIGHT  out=$OUTPUT_DIR"
 deepspeed --num_gpus "$NUM_DEVICES" src/train/train_lvr.py \
