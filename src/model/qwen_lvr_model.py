@@ -114,10 +114,13 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         criterion: Optional[str]="mse",
         lvr_end_threshold: Optional[float]=0.02,
         lvr_steps: Optional[List[int]]=None,
+        latent_intervention: Optional[Callable]=None,
         **kwargs,
         ) -> Union[GenerateOutput, torch.LongTensor]:
         """
-            Patching the generation function for LVR
+            Patching the generation function for LVR.
+            latent_intervention(hidden[B,H], lvr_mode_switch[B]bool)->hidden : optional do(Z) hook applied
+            to each latent hidden state before it is fed forward (used by the CapImagine do(Z) harness).
         """
 
         # Params in 
@@ -328,6 +331,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
                 synced_gpus=synced_gpus,
                 streamer=streamer,
                 lvr_steps = lvr_steps,
+                latent_intervention=latent_intervention,
                 **model_kwargs,)
         else:
             # Vanilla decoding
@@ -861,6 +865,7 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
         synced_gpus: bool,
         streamer: Optional["BaseStreamer"],
         lvr_steps: List[int],
+        latent_intervention=None,
         **model_kwargs,
     ) -> Union[GenerateNonBeamOutput, torch.LongTensor]:
         r"""
@@ -1050,6 +1055,10 @@ class QwenWithLVR(Qwen2_5_VLForConditionalGeneration):
 
 
             last_position_hidden_state = outputs.last_position_hidden_state
+            # do(Z) hook: corrupt/capture the latent hidden state before it is fed forward as the next
+            # latent. Only rows currently in latent mode (lvr_mode_switch) are affected. No-op if None.
+            if latent_intervention is not None and last_position_hidden_state is not None:
+                last_position_hidden_state = latent_intervention(last_position_hidden_state, lvr_mode_switch)
 
             # update generated ids, model inputs, and length for next step
             input_ids = torch.cat([input_ids, next_tokens[:, None]], dim=-1)
