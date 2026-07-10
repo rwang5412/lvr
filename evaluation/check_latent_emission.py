@@ -33,7 +33,15 @@ from qwen_vl_utils import process_vision_info
 from src.model.qwen_lvr_model import QwenWithLVR
 from src.train.monkey_patch_forward_lvr import replace_qwen2_5_with_mixed_modality_forward_lvr
 
-LVR_START, LVR, LVR_END = "<|lvr_start|>", "<|lvr|>", "<|lvr_end|>"
+LVR_START, LVR, LVR_END, LVR_LATENT_END = "<|lvr_start|>", "<|lvr|>", "<|lvr_end|>", "<|lvr_latent_end|>"
+
+
+def _strip_latents(out):
+    """Remove all latent scaffolding tokens to reveal the actual answer text the model produced."""
+    a = out
+    for t in (LVR_START, LVR, LVR_LATENT_END, LVR_END, "<|im_end|>", "<|endoftext|>"):
+        a = a.replace(t, "")
+    return a.strip()
 
 
 # ---- inlined from evaluation.py (inference path) ------------------------------------------------
@@ -105,9 +113,12 @@ def main():
         img = os.path.join(args.image_folder, _image(rec))
         out = run_inference(model, processor, img, q, args.lvr_steps, args.decoding_strategy)[0]
         has_start = LVR_START in out
+        n_lat = out.count(LVR) + out.count(LVR_LATENT_END)   # latent steps (decode as <|lvr_latent_end|>)
+        answer = _strip_latents(out)                          # the actual text after the latent block
         n_latent += int(has_start)
-        print(f"\n[{i}] latent_start={has_start}  <lvr>x{out.count(LVR)}  lvr_end={LVR_END in out}  Q: {q[:70]}")
-        print(f"    OUT: {out[:320]!r}")
+        print(f"\n[{i}] latent_start={has_start}  latent_steps={n_lat}  Q: {q[:70]}")
+        print(f"    ANSWER (latents stripped): {answer[:200]!r}")
+        print(f"    raw[:700]: {out[:700]!r}")
 
     print(f"\n=== {n_latent}/{len(recs)} examples emitted <|lvr_start|> (entered latent reasoning) ===")
     if n_latent == 0:
