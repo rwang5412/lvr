@@ -23,7 +23,6 @@ are scored; N is reported. Per-checkpoint: run on base / bottleneck / distill an
 """
 
 import argparse
-import importlib.util
 import json
 import os
 import re
@@ -38,20 +37,75 @@ from src.train.monkey_patch_forward_lvr import replace_qwen2_5_with_mixed_modali
 LVR_START, LVR, LVR_END, LVR_LATENT_END = "<|lvr_start|>", "<|lvr|>", "<|lvr_end|>", "<|lvr_latent_end|>"
 STRATEGIES = ["identical", "gauss_add", "gauss_replace", "near_zero"]
 MC_TASK_INSTRUCTION = "\nAnswer with the option's letter from the given choices directly."
-BENCH_LOADERS = {  # ds_name -> evaluation.py loader fn name; all return (data,image_dir,out_dir,ds_name)
-    "vstar": "load_vstar_dataset", "mmvp": "load_mmvp_dataset", "blink": "load_blink_dataset",
-    "hrbench_4k": "load_hrbench_4k_dataset", "hrbench_8k": "load_hrbench_8k_dataset",
-    "mme_realworld": "load_mme_realworld_dataset",
-}
+BENCHMARKS = ["vstar", "hrbench_4k", "hrbench_8k", "mme_realworld"]
 
 
-def _eval_module():
-    """Load evaluation.py by path (evaluation/ isn't a package, so a plain import clashes)."""
-    p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evaluation.py")
-    spec = importlib.util.spec_from_file_location("lvr_evaluation_mod", p)
-    m = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(m)
-    return m
+def _to_pil(x):
+    """Normalize a dataset image field to something process_vision_info accepts (PIL, or a path str)."""
+    import base64
+    import io
+    from PIL import Image
+    if isinstance(x, Image.Image):
+        return x.convert("RGB")
+    if isinstance(x, dict) and x.get("bytes"):
+        return Image.open(io.BytesIO(x["bytes"])).convert("RGB")
+    if isinstance(x, (bytes, bytearray)):
+        return Image.open(io.BytesIO(x)).convert("RGB")
+    if isinstance(x, str):
+        try:                                  # benchmarks embed base64 JPEG strings ("/9j/...")
+            return Image.open(io.BytesIO(base64.b64decode(x))).convert("RGB")
+        except Exception:
+            return x                          # else it's a file path
+    return x
+
+
+def _load_hrbench(which):   # which = "hrbench_4k" | "hrbench_8k" (they are SPLITS of one config now)
+    from datasets import load_dataset
+    ds = load_dataset("DreamMr/HR-Bench", "hrbench_version_split")[which]
+    out = []
+    for d in ds:
+        opts = "\n".join(f"{L}. {d[L]}" for L in "ABCD")
+        out.append({"image": _to_pil(d["image"]),
+                    "question": d["question"] + "\nOptions:\n" + opts + MC_TASK_INSTRUCTION,
+                    "gold": str(d["answer"]).strip().upper()[:1], "is_mc": True})
+    return out
+
+
+def _load_mme():
+    from datasets import load_dataset
+    dsd = load_dataset("yifanzhang114/MME-RealWorld-Lite")
+    ds = dsd["train"] if "train" in dsd else dsd[list(dsd.keys())[0]]
+    out = []
+    for d in ds:
+        opts = "\n".join(d["multi-choice options"])
+        out.append({"image": _to_pil(d["image"]),
+                    "question": d["question"] + "\n" + opts + MC_TASK_INSTRUCTION,
+                    "gold": str(d["answer"]).strip().upper()[:1], "is_mc": True})
+    return out
+
+
+def _load_vstar():
+    # NOTE: verify craigwu/vstar_bench's current schema (field names) with a dump; adjust if this errors.
+    from datasets import load_dataset
+    ds = load_dataset("craigwu/vstar_bench")["test"]
+    out = []
+    for d in ds:
+        q = d.get("question") or d.get("text") or ""
+        gold = d.get("label") or d.get("answer") or ""
+        out.append({"image": _to_pil(d["image"]),
+                    "question": q + MC_TASK_INSTRUCTION,
+                    "gold": str(gold).strip().upper()[:1], "is_mc": True})
+    return out
+
+
+def _load_benchmark(name):
+    if name in ("hrbench_4k", "hrbench_8k"):
+        return _load_hrbench(name)
+    if name == "mme_realworld":
+        return _load_mme()
+    if name == "vstar":
+        return _load_vstar()
+    raise ValueError(name)
 
 
 # ------------------------------------------------------------------------------ model / generation --
@@ -157,25 +211,14 @@ def load_items(args):
             items.append({"image": os.path.join(args.image_folder, img), "question": q, "gold": gold, "is_mc": False})
         return items
 
-    # benchmark: reuse evaluation.py's loader (returns data,image_dir,out_dir,ds_name)
-    ev = _eval_module()
-    data, image_dir, _out, ds_name = getattr(ev, BENCH_LOADERS[args.dataset])(False, "capimagine", "steps")
-    items = []
-    for d in data:
-        img = d["image"]
-        if isinstance(img, str) and image_dir:            # filename -> full path (e.g. MMVP)
-            img = os.path.join(image_dir, img)
-        elif isinstance(img, list):                       # some benches wrap the image in a list
-            img = img[0]
-        items.append({"image": img, "question": d["query"] + MC_TASK_INSTRUCTION, "gold": d["label"], "is_mc": True})
-    return items
+    return _load_benchmark(args.dataset)
 
 
 # ------------------------------------------------------------------------------ main ----------------
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", required=True)
-    ap.add_argument("--dataset", required=True, choices=["gqa"] + list(BENCH_LOADERS))
+    ap.add_argument("--dataset", required=True, choices=["gqa"] + BENCHMARKS)
     ap.add_argument("--records", help="gqa records JSON (only for --dataset gqa)")
     ap.add_argument("--image-folder", default="", help="image root for gqa")
     ap.add_argument("--use-bottleneck", type=int, default=0, help="1 = apply answer->image mask at eval")
