@@ -155,10 +155,26 @@ def make_corruptor(strategy, mu, sigma, eps=1e-2):
             new = torch.full_like(h, eps)
         elif strategy == "gauss_replace":
             new = mu_d + torch.randn_like(h) * sig_d
-        elif strategy == "gauss_add":
+        elif strategy == "gauss_add":  # compounding variant — NOT used; harness routes gauss_add to make_oneshot_gauss
             new = h + torch.randn_like(h) * sig_d
         else:
             raise ValueError(strategy)
+        return h * (1 - m) + new * m
+    return fn
+
+
+def make_oneshot_gauss(clean_seq, sigma):
+    """One-shot gauss_add (matches the paper): add fresh Gaussian noise to the CLEAN latent at each
+    position, replayed from the clean pass — so the noise is added ONCE to the original latents and does
+    NOT compound down the autoregressive chain. clean_seq is this example's captured clean latents [n,H]."""
+    clean_seq = clean_seq.float()
+    state = {"k": 0}
+    def fn(h, mode):
+        m = mode.view(-1, 1).to(h.dtype)
+        k = state["k"]
+        base = clean_seq[k].to(h.device, h.dtype).view(1, -1).expand_as(h) if k < clean_seq.shape[0] else h
+        new = base + torch.randn_like(h) * sigma.to(h.device, h.dtype)
+        state["k"] = k + int(bool(mode.any().item()))   # advance only on latent-mode steps
         return h * (1 - m) + new * m
     return fn
 
@@ -231,12 +247,14 @@ def main():
     items = load_items(args)[: args.limit]
     print(f"[capimagine] dataset={args.dataset}  items={len(items)}  lvr_steps={args.lvr_steps}")
 
-    # ---- Phase 0: clean generation — capture latents, clean accuracy, valid-latent filter ----
-    store = []
-    capt = make_capturer(store)
+    # ---- Phase 0: clean generation — capture latents PER EXAMPLE, clean accuracy, valid-latent filter ----
     clean = []
+    clean_latents = []          # per-example clean latent sequence [n_lat_i, H] (for one-shot gauss_add)
     for i, it in enumerate(items):
-        out = generate(model, processor, it["image"], it["question"], args.lvr_steps, latent_intervention=capt)
+        ex_store = []
+        out = generate(model, processor, it["image"], it["question"], args.lvr_steps,
+                       latent_intervention=make_capturer(ex_store))
+        clean_latents.append(torch.cat(ex_store, dim=0) if ex_store else torch.empty(0))
         clean.append({"valid": LVR_START in out, "correct": score(out, it["gold"], it["is_mc"]), "it": it})
         if (i + 1) % 20 == 0:
             print(f"[capimagine] clean {i + 1}/{len(items)}")
@@ -245,7 +263,7 @@ def main():
     N = len(valid)
     if N == 0:
         raise SystemExit(f"No valid-latent instances on {args.dataset} (no <|lvr_start|>). do(Z) is moot here.")
-    Z = torch.cat(store, dim=0)
+    Z = torch.cat([clean_latents[i] for i in valid if clean_latents[i].numel()], dim=0)
     mu, sigma = Z.mean(0), Z.std(0)
     clean_acc = sum(clean[i]["correct"] for i in valid) / N
     print(f"[capimagine] valid-latent N={N}/{len(items)} | clean acc={clean_acc:.4f} | latents={tuple(Z.shape)}")
@@ -253,10 +271,13 @@ def main():
     # ---- Phase 1-4: do(Z) interventions on the valid instances ----
     results = {}
     for strat in STRATEGIES:
-        corr = make_corruptor(strat, mu, sigma)
         n_correct = flip_to_wrong = flip_to_right = 0
         for i in valid:
             r = clean[i]
+            # gauss_add: add noise ONCE to this example's clean latents (paper's one-shot). The other 3
+            # fully REPLACE each latent, so compounding-vs-one-shot is identical for them.
+            corr = (make_oneshot_gauss(clean_latents[i], sigma) if strat == "gauss_add"
+                    else make_corruptor(strat, mu, sigma))
             out = generate(model, processor, r["it"]["image"], r["it"]["question"], args.lvr_steps, latent_intervention=corr)
             c = score(out, r["it"]["gold"], r["it"]["is_mc"])
             n_correct += int(c)
