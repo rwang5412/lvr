@@ -36,6 +36,9 @@ LR="${LR:-1e-5}"
 LAMBDA_LVR="${LAMBDA_LVR:-0.1}"
 LST="${LST:-4096}"
 MAX_INSTANCE_PER_BATCH="${MAX_INSTANCE_PER_BATCH:-4}"
+# zero3_offload.json = CPU-offload (needs cpu_adam; use on 40GB A100). On 80GB H100 use zero3.json
+# (fully sharded, NO offload) -> fused GPU Adam, no cpu_adam build at all: DEEPSPEED_CONFIG=scripts/zero3.json
+DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/zero3_offload.json}"
 
 export WANDB_PROJECT="${WANDB_PROJECT:-LVR-7B-Step1-Bottleneck}"
 export WANDB_MODE="${WANDB_MODE:-offline}"        # compute nodes have no internet
@@ -56,15 +59,19 @@ cd "$PROJECT_ROOT"
 # BOTH paths: code mixes `from src.X` (needs root) and `from train.X` (needs root/src).
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src:${PYTHONPATH:-}"
 
-# cpu_adam is JIT-compiled at startup; >1 rank racing to build it into one dir corrupts the build.
-# PRE-BUILD it ONCE, single-process, into a PER-JOB dir under $HOME (exec-able + proven to build here;
-# /tmp on the compute nodes fails the build -> "No such file" .so). Own line (NOT `&&`) so a build
-# failure trips `set -e` and aborts with a clear error instead of proceeding to a broken multi-rank launch.
-export TORCH_EXTENSIONS_DIR="$HOME/.cache/torch_ext_${SLURM_JOB_ID:-$$}"
-mkdir -p "$TORCH_EXTENSIONS_DIR"
-echo "[prebuild] compiling cpu_adam single-process into $TORCH_EXTENSIONS_DIR ..."
-python -c "from deepspeed.ops.op_builder import CPUAdamBuilder; CPUAdamBuilder().load()"
-echo "[prebuild] cpu_adam OK"
+# cpu_adam is ONLY needed when the deepspeed config offloads the optimizer to CPU. If so, PRE-BUILD it
+# single-process into a per-job $HOME dir so the ranks don't race to JIT-compile it (own line -> a build
+# failure trips set -e). With a NO-offload config (zero3.json on H100) this is skipped entirely -> no
+# cpu_adam, no build, no race. (cpu_adam builds on A100 but fails on H100's AVX-512 CPU.)
+if grep -q '"offload_optimizer"' "$DEEPSPEED_CONFIG"; then
+    export TORCH_EXTENSIONS_DIR="$HOME/.cache/torch_ext_${SLURM_JOB_ID:-$$}"
+    mkdir -p "$TORCH_EXTENSIONS_DIR"
+    echo "[prebuild] $DEEPSPEED_CONFIG offloads optimizer -> compiling cpu_adam single-process ..."
+    python -c "from deepspeed.ops.op_builder import CPUAdamBuilder; CPUAdamBuilder().load()"
+    echo "[prebuild] cpu_adam OK"
+else
+    echo "[prebuild] $DEEPSPEED_CONFIG has no CPU offload -> skipping cpu_adam (fused GPU Adam)"
+fi
 
 echo "=== bottleneck FT ===  init=$CHECKPOINT_NAME  data=$DATA_PATH  max_steps=$MAX_STEPS  gpus=$NUM_DEVICES  out=$OUTPUT_DIR"
 deepspeed --num_gpus "$NUM_DEVICES" src/train/train_lvr.py \
@@ -72,7 +79,7 @@ deepspeed --num_gpus "$NUM_DEVICES" src/train/train_lvr.py \
     --checkpoint_name "$CHECKPOINT_NAME" \
     --coconut True \
     --loss_lvr_fct mse \
-    --deepspeed scripts/zero3_offload.json \
+    --deepspeed "$DEEPSPEED_CONFIG" \
     --model_id "$MODEL_NAME" \
     --data_path "$DATA_PATH" \
     --remove_unused_columns False \
