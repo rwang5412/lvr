@@ -659,6 +659,21 @@ def load_mme_realworld_dataset(gen_w_head,run_name,decoding_strategy):
 def main():
     DECODING_STRATEGY = "steps"  # or "latent"
 
+    # Per-run overrides via env (so you don't edit module-level constants every run):
+    #   EVAL_CHECKPOINTS=/path/a,/path/b   -> which checkpoint(s) to eval (default: CHKPT_PATHS)
+    #   EVAL_DATASETS=hrbench_4k,mme_realworld -> which benchmarks (default: all in DATASET_CONFIG)
+    _ckpts_env = os.environ.get("EVAL_CHECKPOINTS")
+    checkpoints = [c.strip() for c in _ckpts_env.split(",") if c.strip()] if _ckpts_env else CHKPT_PATHS
+    _ds_env = os.environ.get("EVAL_DATASETS")
+    if _ds_env:
+        want = {s.strip() for s in _ds_env.split(",") if s.strip()}
+        unknown = want - set(DATASET_CONFIG)
+        if unknown:
+            raise SystemExit(f"EVAL_DATASETS has unknown benchmarks {sorted(unknown)}; valid: {list(DATASET_CONFIG)}")
+        selected = {k: v for k, v in DATASET_CONFIG.items() if k in want}
+    else:
+        selected = DATASET_CONFIG
+
     # Persist all printed output to a timestamped log file under evaluation/results_log/.
     log_dir = os.path.join(EVAL_DIR, "results_log")
     os.makedirs(log_dir, exist_ok=True)
@@ -666,13 +681,14 @@ def main():
     log_file = open(log_path, "a")
     sys.stdout = _Tee(sys.__stdout__, log_file)
     print(f"Logging all evaluation output to {log_path}")
+    print(f"Checkpoints: {checkpoints}\nBenchmarks: {list(selected)}")
 
-    for checkpoint_dir in CHKPT_PATHS:
+    for checkpoint_dir in checkpoints:
         model, processor, run_name = load_model_and_processor(checkpoint_dir)
         gen_w_head = model.config.lvr_head
 
         print("\n" + "="*128 + "\nEvaluating model:\n" +  f"{checkpoint_dir} \n"+"="*128 + "\n")
-        for bench_name, cfg in DATASET_CONFIG.items():
+        for bench_name, cfg in selected.items():
             print("<"*64 + f" {bench_name} evaluation " + ">"*64)
             dataset, image_dir, out_dir, ds_name= cfg["loader"](gen_w_head,run_name,decoding_strategy=DECODING_STRATEGY)
             cfg["evaluator"](model, processor, dataset, image_dir, out_dir, ds_name, decoding_strategy=DECODING_STRATEGY)
