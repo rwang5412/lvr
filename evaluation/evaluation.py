@@ -26,7 +26,7 @@ import datetime
 
 from src.train.monkey_patch_forward_lvr import replace_qwen2_5_with_mixed_modality_forward_lvr
 
-STEP_LIST = [4,8,16]
+STEP_LIST = [int(x) for x in os.environ.get("EVAL_STEPS", "4,8,16").split(",") if x.strip()]  # e.g. EVAL_STEPS=16 for one depth
 # ==== Config ====
 
 
@@ -39,7 +39,7 @@ DATASET_CONFIG = {
     },
     "vstar": {
         "loader": lambda gen_w_head,run_name,decoding_strategy: load_vstar_dataset(gen_w_head,run_name,decoding_strategy),
-        "evaluator": lambda model,proc,data,img_dir,out_dir,ds_name,decoding_strategy: evaluate_vstar(model, proc, data, img_dir, out_dir, ds_name, decoding_strategy),
+        "evaluator": lambda model,proc,data,img_dir,out_dir,ds_name,decoding_strategy: evaluate_generic(model, proc, data, img_dir, out_dir, ds_name, decoding_strategy),
     },
     "MMVP": {
         "loader": lambda gen_w_head,run_name,decoding_strategy: load_mmvp_dataset(gen_w_head,run_name,decoding_strategy),
@@ -505,17 +505,33 @@ def evaluate_generic(
 # ==== Example dataset loader stubs ====
 def load_vstar_dataset(gen_w_head,run_name,decoding_strategy):
     ds_name = "vstar"
-    # Implement loading from files or a proper library
-    ds = load_dataset("craigwu/vstar_bench")
-    image_dir = "/dockerx/bangzhli/projects/LVR-Finetune/evaluation/vstar_bench"
+    ds = load_dataset("craigwu/vstar_bench")["test"]
+    # V* is letter multiple-choice (categories: direct_attributes / relative_position). Images come
+    # embedded from HF; if this copy stores them as relative paths instead, set VSTAR_IMAGE_DIR to the
+    # staged image root. Normalized to the BLINK-style schema so it runs through evaluate_generic.
+    img_root = os.environ.get("VSTAR_IMAGE_DIR")
 
-    if gen_w_head:
-        out_dir = os.path.join("/dockerx/bangzhli/projects/LVR-Finetune/evaluation/vstar_bench/results",f"decoding_by_{decoding_strategy}","GenWHead"+run_name)
+    processed_data = []
+    for i, dat in enumerate(ds):
+        q = dat.get("text") or dat.get("question") or ""
+        raw = str(dat.get("label", dat.get("answer", ""))).strip().upper()
+        label = next((c for c in raw if c.isalpha()), raw[:1])   # "A" / "(A)" / "A." -> "A"
+        qid = dat.get("question_id", i)
+        category = dat.get("category")
+        if category is None:
+            try:
+                category = "direct_attributes" if int(qid) <= 114 else "relative_position"
+            except (ValueError, TypeError):
+                category = "all"
+        img = dat.get("image")
+        img = os.path.join(img_root, img) if (isinstance(img, str) and img_root) else _row_image(dat)
+        processed_data.append({
+            "question_id": qid, "image": img, "query": q, "label": label, "category": category,
+        })
 
-    else:
-        out_dir = os.path.join("/dockerx/bangzhli/projects/LVR-Finetune/evaluation/vstar_bench/results",f"decoding_by_{decoding_strategy}",run_name)
-
-    return ds['test'],image_dir,out_dir,ds_name
+    image_dir = None
+    out_dir = _results_dir(ds_name, gen_w_head, run_name, decoding_strategy)
+    return processed_data, image_dir, out_dir, ds_name
 
 import csv
 def load_mmvp_dataset(gen_w_head,run_name,decoding_strategy):
@@ -691,6 +707,9 @@ def main():
         for bench_name, cfg in selected.items():
             print("<"*64 + f" {bench_name} evaluation " + ">"*64)
             dataset, image_dir, out_dir, ds_name= cfg["loader"](gen_w_head,run_name,decoding_strategy=DECODING_STRATEGY)
+            if int(os.environ.get("EVAL_LIMIT", "0")) > 0:
+                dataset = list(dataset)[: int(os.environ["EVAL_LIMIT"])]
+                print(f"[EVAL_LIMIT] {ds_name}: capped to {len(dataset)} examples")
             cfg["evaluator"](model, processor, dataset, image_dir, out_dir, ds_name, decoding_strategy=DECODING_STRATEGY)
 
     print(f"\nDone. Full output saved to {log_path}")
