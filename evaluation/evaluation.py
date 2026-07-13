@@ -654,16 +654,16 @@ def load_mme_realworld_dataset(gen_w_head,run_name,decoding_strategy):
     ds = dsd[split]
 
     processed_data = []
-    for dat in ds:
-        options = dat["multi-choice options"]
+    for i, dat in enumerate(ds):
+        options = dat.get("multi-choice options") or []
         question = dat["question"] + "\n" + "\n".join(options)
-        ans = dat["answer"].strip().upper()[0]
+        ans = str(dat["answer"]).strip().upper()[0]
         buffer = {
-            "question_id": dat["index"],
+            "question_id": dat.get("index", i),
             "image": _row_image(dat),
             "query": question,
             "label": ans,
-            "category": dat["l2-category"],  # subtask, for per-category breakdown
+            "category": dat.get("l2-category", "all"),  # subtask, for per-category breakdown
         }
         processed_data.append(buffer)
 
@@ -706,11 +706,16 @@ def main():
         print("\n" + "="*128 + "\nEvaluating model:\n" +  f"{checkpoint_dir} \n"+"="*128 + "\n")
         for bench_name, cfg in selected.items():
             print("<"*64 + f" {bench_name} evaluation " + ">"*64)
-            dataset, image_dir, out_dir, ds_name= cfg["loader"](gen_w_head,run_name,decoding_strategy=DECODING_STRATEGY)
-            if int(os.environ.get("EVAL_LIMIT", "0")) > 0:
-                dataset = list(dataset)[: int(os.environ["EVAL_LIMIT"])]
-                print(f"[EVAL_LIMIT] {ds_name}: capped to {len(dataset)} examples")
-            cfg["evaluator"](model, processor, dataset, image_dir, out_dir, ds_name, decoding_strategy=DECODING_STRATEGY)
+            try:
+                dataset, image_dir, out_dir, ds_name= cfg["loader"](gen_w_head,run_name,decoding_strategy=DECODING_STRATEGY)
+                if int(os.environ.get("EVAL_LIMIT", "0")) > 0:
+                    dataset = list(dataset)[: int(os.environ["EVAL_LIMIT"])]
+                    print(f"[EVAL_LIMIT] {ds_name}: capped to {len(dataset)} examples")
+                cfg["evaluator"](model, processor, dataset, image_dir, out_dir, ds_name, decoding_strategy=DECODING_STRATEGY)
+            except Exception as e:
+                import traceback
+                print(f"!! SKIPPED {bench_name}: {type(e).__name__}: {e} — continuing with the rest.")
+                traceback.print_exc()
 
     print(f"\nDone. Full output saved to {log_path}")
     sys.stdout = sys.__stdout__
