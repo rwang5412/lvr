@@ -30,7 +30,7 @@ STEP_LIST = [4,8,16]
 # ==== Config ====
 
 
-CHKPT_PATHS = ["weights/LVR-7B"]
+CHKPT_PATHS = ["/scratch/haizhow/ckpts/distill_7b/checkpoint-833"]
 
 DATASET_CONFIG = {
     'blink': {
@@ -76,6 +76,12 @@ def _to_pil(img):
             return Image.open(img["path"]).convert("RGB")
     if isinstance(img, (bytes, bytearray)):
         return Image.open(io.BytesIO(img)).convert("RGB")
+    if isinstance(img, str):
+        import base64
+        try:                                  # benchmarks may embed base64 JPEG strings ("/9j/...")
+            return Image.open(io.BytesIO(base64.b64decode(img))).convert("RGB")
+        except Exception:
+            return img                        # else a real path / url — handled downstream
     return img  # path / url — handled downstream by qwen_vl_utils
 
 def _row_image(row):
@@ -592,23 +598,24 @@ def load_blink_dataset(gen_w_head,run_name,decoding_strategy):
 def _load_hrbench(hr_config,gen_w_head,run_name,decoding_strategy):
     # hr_config is "hrbench_4k" or "hrbench_8k"; used as both the HF config and the ds_name.
     ds_name = hr_config
-    dsd = load_dataset("DreamMr/HR-Bench", hr_config)
-    split = list(dsd.keys())[0]  # split name varies by repo version
-    ds = dsd[split]
+    # HR-Bench now ships ONE config "hrbench_version_split" with hrbench_4k / hrbench_8k as SPLITS
+    # (the old per-resolution configs were removed). hr_config doubles as the split name.
+    dsd = load_dataset("DreamMr/HR-Bench", "hrbench_version_split")
+    ds = dsd[hr_config]
 
     processed_data = []
-    for dat in ds:
+    for i, dat in enumerate(ds):
         option_string = ""
         for letter in ['A','B','C','D']:
             option_string += f"{letter}. {dat[letter]}\n"
         question = dat['question'] + "\nOptions:\n" + option_string
-        ans = dat['answer'].strip().upper()[0]
+        ans = str(dat['answer']).strip().upper()[0]
         buffer = {
-            "question_id": dat["index"],
+            "question_id": dat.get("index", i),
             "image": _row_image(dat),
             "query": question,
             "label": ans,
-            "category": dat["category"],  # single (FSP) / cross (FCP)
+            "category": dat.get("category", "all"),  # single (FSP) / cross (FCP)
         }
         processed_data.append(buffer)
 
