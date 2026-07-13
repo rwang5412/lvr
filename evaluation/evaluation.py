@@ -603,12 +603,7 @@ def load_blink_dataset(gen_w_head,run_name,decoding_strategy):
             }
             processed_data.append(buffer)
 
-    if gen_w_head:
-        out_dir = os.path.join("/dockerx/bangzhli/projects/LVR-Finetune/evaluation/blink/results",f"decoding_by_{decoding_strategy}","GenWHead"+run_name)
-
-    else:
-        out_dir = os.path.join("/dockerx/bangzhli/projects/LVR-Finetune/evaluation/blink/results",f"decoding_by_{decoding_strategy}",run_name)
-
+    out_dir = _results_dir(ds_name, gen_w_head, run_name, decoding_strategy)
     return processed_data,image_dir,out_dir,ds_name
 
 def _load_hrbench(hr_config,gen_w_head,run_name,decoding_strategy):
