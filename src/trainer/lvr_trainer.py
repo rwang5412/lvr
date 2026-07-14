@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import wandb
 from src.train.distill_loss import distill_kl_over_answer
+from src.train.necessity_loss import necessity_margin_over_answer
 from transformers import Trainer
 from transformers.trainer import (
     is_sagemaker_mp_enabled,
@@ -264,12 +265,37 @@ class QwenLVRSFTTrainer(Trainer):
                 inputs["input_ids"], inputs["labels"], self.model.config,
             )
 
+        # Necessity loss (NO bottleneck): force the answer to depend on Z by requiring that ABLATING Z
+        # (replacing the <lvr> embeddings with an in-distribution substitute) makes the gold answer at
+        # least `necessity_margin` nats harder. The ablated forward runs WITH grad (we push its answer
+        # DOWN), so drop `labels` to skip the throwaway CE + fp32 logit upcast (memory). Ablation is
+        # in-distribution (shuffle/mean), NEVER zeros. necessity_weight=0 skips the pass -> baseline.
+        # Independent of the distill block above (both off -> identical to Step-1).
+        loss_necessity = None
+        if self.args.necessity_weight > 0:
+            clean_latents = outputs.latent_target_embeds   # [L_total, H], detached, nonzero(lvr_mask) order
+            if clean_latents is not None and clean_latents.shape[0] > 0:
+                if self.args.necessity_ablation == "mean":
+                    ablation = clean_latents.mean(dim=0, keepdim=True).expand_as(clean_latents)
+                else:  # "shuffle": random in-batch permutation of the real latents (in-distribution)
+                    perm = torch.randperm(clean_latents.shape[0], device=clean_latents.device)
+                    ablation = clean_latents[perm]
+                nec_inputs = {k: v for k, v in inputs.items() if k != "labels"}
+                ablated_outputs = model(**nec_inputs, override_latent_embeds=ablation)
+                loss_necessity = necessity_margin_over_answer(
+                    outputs.logits, ablated_outputs.logits,
+                    inputs["input_ids"], inputs["labels"], self.model.config,
+                    margin=self.args.necessity_margin,
+                )
+
         if self.args.mode_switch_loss:
             loss = loss_ce + self.args.loss_lvr_lambda * loss_lvr + self.args.loss_mode_switch_lambda * loss_mode_switch
         else:
             loss = loss_ce + self.args.loss_lvr_lambda * loss_lvr if self.args.loss_lvr_lambda > 0 else loss_ce
         if loss_kl is not None:
             loss = loss + self.args.distill_weight * loss_kl
+        if loss_necessity is not None:
+            loss = loss + self.args.necessity_weight * loss_necessity
 
         # Log each component
         self.log({
@@ -278,6 +304,7 @@ class QwenLVRSFTTrainer(Trainer):
             "loss_lvr": loss_lvr.detach().item() if loss_lvr is not None else 0.0,
             "loss_mode_switch": loss_mode_switch.detach().item() if loss_mode_switch is not None else 0.0,
             "loss_kl": loss_kl.detach().item() if loss_kl is not None else 0.0,
+            "loss_necessity": loss_necessity.detach().item() if loss_necessity is not None else 0.0,
         })
 
 
