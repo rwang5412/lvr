@@ -31,7 +31,7 @@ def _fixture():
 
 def test_necessity_pure():
     input_ids, labels = _fixture()
-    B, L, V = 1, input_ids.shape[1], 50
+    B, L, V = 1, input_ids.shape[1], 512   # V > max answer token id (402) — they are cross_entropy targets
     with_logits = torch.randn(B, L, V, requires_grad=True)
     ablated = torch.randn(B, L, V, requires_grad=True)
 
@@ -47,7 +47,7 @@ def test_necessity_pure():
 def test_necessity_zero_when_satisfied():
     """If ablating already makes the gold answer >> margin harder, the hinge clamps to 0."""
     input_ids, labels = _fixture()
-    L, V = input_ids.shape[1], 50
+    L, V = input_ids.shape[1], 512   # V > max answer token id (402); gold tokens indexed below
     with_logits = torch.zeros(1, L, V)                       # uniform -> nll_with = log(V)
     ablated = torch.zeros(1, L, V)
     for pred_pos, gold_tok in [(8, 400), (9, 401), (10, 402)]:   # gold token very unlikely at its predicting pos
