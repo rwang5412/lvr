@@ -505,11 +505,11 @@ def evaluate_generic(
 # ==== Example dataset loader stubs ====
 def load_vstar_dataset(gen_w_head,run_name,decoding_strategy):
     ds_name = "vstar"
-    ds = load_dataset("craigwu/vstar_bench")["test"]
-    # V* is letter multiple-choice (categories: direct_attributes / relative_position). Images come
-    # embedded from HF; if this copy stores them as relative paths instead, set VSTAR_IMAGE_DIR to the
-    # staged image root. Normalized to the BLINK-style schema so it runs through evaluate_generic.
-    img_root = os.environ.get("VSTAR_IMAGE_DIR")
+    # lmms-lab/vstar-bench EMBEDS images (JpegImageFile) + text/label/category/question_id; craigwu's
+    # copy stores image as a path string (would need VSTAR_IMAGE_DIR). Prefer the embedded one.
+    dsd = load_dataset("lmms-lab/vstar-bench")
+    ds = dsd["test"] if "test" in dsd else dsd[list(dsd.keys())[0]]
+    img_root = os.environ.get("VSTAR_IMAGE_DIR")   # only used if a path-based copy is loaded instead
 
     processed_data = []
     for i, dat in enumerate(ds):
@@ -536,31 +536,30 @@ def load_vstar_dataset(gen_w_head,run_name,decoding_strategy):
 import csv
 def load_mmvp_dataset(gen_w_head,run_name,decoding_strategy):
     ds_name = "mmvp"
-    csv_file = "/dockerx/bangzhli/projects/LVR-Finetune/evaluation/MMVP/Questions.csv"
-    image_dir = "/dockerx/bangzhli/projects/LVR-Finetune/evaluation/MMVP/MMVP_Images"
+    # HF's MMVP/MMVP has images ONLY (no Q&A). The questions live in the MMVP GitHub repo:
+    # Questions.csv + "MMVP Images/" (files named <Index>.jpg). Stage that repo, set MMVP_DIR.
+    mmvp_dir = os.environ.get("MMVP_DIR")
+    if not mmvp_dir:
+        raise FileNotFoundError(
+            "MMVP needs the GitHub repo staged (HF has images only). "
+            "Set MMVP_DIR=/path/to/MMVP containing Questions.csv + 'MMVP Images/'.")
+    csv_file = os.path.join(mmvp_dir, "Questions.csv")
+    image_dir = next((os.path.join(mmvp_dir, d) for d in ("MMVP Images", "MMVP_Images")
+                      if os.path.isdir(os.path.join(mmvp_dir, d))), os.path.join(mmvp_dir, "MMVP Images"))
 
     data = []
-
     with open(csv_file, newline='', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            # Clean up the row if needed (split options, etc.)
+        for row in csv.DictReader(f):
             idx = int(row["Index"])
-            item = {
+            data.append({
                 "question_id": idx,
-                'image': f"{idx}.jpg",
-                "query": row["Question"] + '\nOptions:\n' + row["Options"], 
-                "label": row["Correct Answer"]
-            }
-            data.append(item)
+                "image": f"{idx}.jpg",
+                "query": row["Question"] + "\nOptions:\n" + row["Options"],
+                "label": str(row["Correct Answer"]).strip(),
+            })
 
-    if gen_w_head:
-        out_dir = os.path.join("/dockerx/bangzhli/projects/LVR-Finetune/evaluation/MMVP/results",f"decoding_by_{decoding_strategy}","GenWHead"+run_name)
-
-    else:
-        out_dir = os.path.join("/dockerx/bangzhli/projects/LVR-Finetune/evaluation/MMVP/results",f"decoding_by_{decoding_strategy}",run_name)
-
-    return data,image_dir,out_dir,ds_name
+    out_dir = _results_dir(ds_name, gen_w_head, run_name, decoding_strategy)
+    return data, image_dir, out_dir, ds_name
 
 from datasets import get_dataset_config_names
 import string
