@@ -28,6 +28,9 @@ class TrainingArguments(HFTrainingArguments):
     loss_lvr_fct: str = field(default="mse")
     loss_lvr_lambda: float = field(default=1e-1)
     distill_weight: float = field(default=0.0)  # self-distillation KL: 0 disables (skips teacher pass); >0 requires use_bottleneck=True
+    necessity_weight: float = field(default=0.0)  # no-bottleneck necessity loss: 0 disables (skips the ablated pass)
+    necessity_margin: float = field(default=1.0)  # target NLL gap (nats): ablating Z must make the gold answer >= this harder
+    necessity_ablation: str = field(default="shuffle")  # how to ablate Z for the necessity pass: "shuffle" | "mean"
 
     freeze_vision_tower: bool = field(default=False)
     freeze_llm: bool = field(default=False)

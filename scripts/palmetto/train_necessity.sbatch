@@ -1,24 +1,29 @@
 #!/usr/bin/env bash
-# Step-1 distill SFT (continue-FT from the LVR base, USE_BOTTLENECK=True + self-distillation KL).
-# IDENTICAL to train_bottleneck.sbatch except: --distill_weight 1.0 and its own $OUTPUT_DIR.
-# Run both with the SAME MAX_STEPS / NUM_DEVICES so the two arms see the same data (comparable).
-# Checkpoints -> $OUTPUT_DIR (scratch). Job log: /scratch/haizhow/logs/train_distill_%j.out
+# Step-1 NECESSITY SFT (continue-FT from the LVR base). NO bottleneck: keeps L_answer + L_patch and adds
+# the answer-margin necessity term between the with-latent and a latent-ABLATED forward (in-distribution
+# shuffle/mean ablation). This is the no-mismatch pivot away from bottleneck+distill.
+#
+# MEMORY: the ablated forward runs WITH grad (unlike distill's no_grad teacher) -> ~2x activations. If it
+# OOMs, LOWER MAX_INSTANCE_PER_BATCH (e.g. 2) before anything else.
 #
 # Usage:
 #   mkdir -p /scratch/haizhow/logs            # once
-#   sbatch scripts/palmetto/train_distill.sbatch
-#   # override step count / slice / distill weight:
-#   sbatch --export=ALL,MAX_STEPS=833,DISTILL_WEIGHT=1.0 scripts/palmetto/train_distill.sbatch
+#   # A100-40GB (default: CPU offload + cpu_adam):
+#   sbatch --export=ALL,MAX_STEPS=833,NECESSITY_WEIGHT=1.0,OUTPUT_DIR=/scratch/haizhow/ckpts/necessity_7b \
+#          scripts/palmetto/train_necessity.sbatch
+#   # H100-80GB (no offload, no cpu_adam, faster):
+#   sbatch --gpus=h100:4 --export=ALL,DEEPSPEED_CONFIG=scripts/zero3.json,MAX_STEPS=833,NECESSITY_WEIGHT=1.0,OUTPUT_DIR=/scratch/haizhow/ckpts/necessity_7b \
+#          scripts/palmetto/train_necessity.sbatch
 #
-#SBATCH --job-name=lvr-distill-ft
+#SBATCH --job-name=lvr-necessity-ft
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=360G   # 7B ZeRO-3 full CPU offload (params+optimizer via cpu_adam) needs ~300G; 200G OOMs
+#SBATCH --mem=360G   # for the CPU-offload default; zero3.json (H100, no offload) needs far less
 #SBATCH --time=24:00:00
 #SBATCH --gpus=a100:4
-#SBATCH --output=/scratch/haizhow/logs/train_distill_%j.out
-#SBATCH --error=/scratch/haizhow/logs/train_distill_%j.err
+#SBATCH --output=/scratch/haizhow/logs/train_necessity_%j.out
+#SBATCH --error=/scratch/haizhow/logs/train_necessity_%j.err
 
 set -euo pipefail
 
@@ -29,24 +34,24 @@ ENV_NAME="${ENV_NAME:-train}"
 MODEL_NAME="${MODEL_NAME:-Qwen/Qwen2.5-VL-7B-Instruct}"
 CHECKPOINT_NAME="${CHECKPOINT_NAME:-/home/haizhow/lvr/weights/LVR-7B}"   # base LVR ckpt (continue-FT init)
 DATA_PATH="${DATA_PATH:-data/meta_data_bottleneck_slice.json}"           # meta -> slice_train.json + image root
-OUTPUT_DIR="${OUTPUT_DIR:-/scratch/haizhow/stage1_arms/distill/}"        # both arms live under stage1_arms/
-MAX_STEPS="${MAX_STEPS:-833}"                                            # MATCH train_bottleneck (1 epoch @ 4 GPU on 80k)
-NUM_DEVICES="${NUM_DEVICES:-4}"                                          # MATCH train_bottleneck for comparability
-GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-8}"                                # global batch = 1 * NUM_DEVICES * GRAD_ACCUM
+OUTPUT_DIR="${OUTPUT_DIR:-/scratch/haizhow/stage1_arms/necessity/}"
+MAX_STEPS="${MAX_STEPS:-833}"
+NUM_DEVICES="${NUM_DEVICES:-4}"
+GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-8}"
 LR="${LR:-1e-5}"
 LAMBDA_LVR="${LAMBDA_LVR:-0.1}"
-DISTILL_WEIGHT="${DISTILL_WEIGHT:-1.0}"                                  # the ONLY knob vs the bottleneck arm
+NECESSITY_WEIGHT="${NECESSITY_WEIGHT:-1.0}"                              # lambda: strength of the necessity term
+NECESSITY_MARGIN="${NECESSITY_MARGIN:-0.5}"                             # M (nats): calibrated start (base clean NLL ~0.08, gap ~0.07); fix M, tune lambda
+NECESSITY_ABLATION="${NECESSITY_ABLATION:-shuffle}"                     # in-distribution ablation: shuffle | mean (NOT zeros)
 LST="${LST:-4096}"
-MAX_INSTANCE_PER_BATCH="${MAX_INSTANCE_PER_BATCH:-4}"
-# zero3_offload.json = CPU-offload (needs cpu_adam; use on 40GB A100). On 80GB H100 use zero3.json
-# (fully sharded, NO offload) -> fused GPU Adam, no cpu_adam build at all: DEEPSPEED_CONFIG=scripts/zero3.json
-DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/zero3_offload.json}"
+MAX_INSTANCE_PER_BATCH="${MAX_INSTANCE_PER_BATCH:-3}"                   # LOWER (2) if the 2nd grad forward OOMs
+DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/zero3_offload.json}"      # H100: pass scripts/zero3.json (no offload)
 
-export WANDB_PROJECT="${WANDB_PROJECT:-LVR-7B-Step1-Distill}"
-export WANDB_MODE="${WANDB_MODE:-offline}"        # compute nodes have no internet
+export WANDB_PROJECT="${WANDB_PROJECT:-LVR-7B-Step1-Necessity}"
+export WANDB_MODE="${WANDB_MODE:-offline}"
 export HF_HOME="${CACHE_ROOT}/huggingface"
 export PYTHONNOUSERSITE=1
-export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"   # reduce fragmentation (distill holds 2 logit tensors)
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"   # necessity holds 2 grad forwards -> reduce fragmentation
 
 [[ -z "${SLURM_JOB_ID:-}" && "${ALLOW_LOCAL:-0}" != "1" ]] && { echo "ERROR: use sbatch (or ALLOW_LOCAL=1)"; exit 1; }
 [[ -d "$PROJECT_ROOT" ]] || { echo "ERROR: PROJECT_ROOT missing: $PROJECT_ROOT"; exit 1; }
@@ -55,16 +60,12 @@ command -v nvidia-smi >/dev/null 2>&1 || { echo "ERROR: no GPU"; exit 1; }
 
 mkdir -p "$OUTPUT_DIR" "$CACHE_ROOT" /scratch/haizhow/logs
 source "$(conda info --base)/etc/profile.d/conda.sh"
-# module load + conda under `set +u`: Lmod/conda touch unbound vars that -u would abort on.
 set +u; conda activate "$ENV_NAME"; module load cuda/12.3 gcc/12.3.0; set -u
 cd "$PROJECT_ROOT"
-# BOTH paths: code mixes `from src.X` (needs root) and `from train.X` (needs root/src).
 export PYTHONPATH="$PROJECT_ROOT:$PROJECT_ROOT/src:${PYTHONPATH:-}"
 
-# cpu_adam is ONLY needed when the deepspeed config offloads the optimizer to CPU. If so, PRE-BUILD it
-# single-process into a per-job $HOME dir so the ranks don't race to JIT-compile it (own line -> a build
-# failure trips set -e). With a NO-offload config (zero3.json on H100) this is skipped entirely -> no
-# cpu_adam, no build, no race. (cpu_adam builds on A100 but fails on H100's AVX-512 CPU.)
+# cpu_adam only needed when the deepspeed config offloads the optimizer to CPU. Pre-build single-process so
+# ranks don't race; skipped entirely for a no-offload config (zero3.json on H100).
 if grep -q '"offload_optimizer"' "$DEEPSPEED_CONFIG"; then
     export TORCH_EXTENSIONS_DIR="$HOME/.cache/torch_ext_${SLURM_JOB_ID:-$$}"
     mkdir -p "$TORCH_EXTENSIONS_DIR"
@@ -75,9 +76,9 @@ else
     echo "[prebuild] $DEEPSPEED_CONFIG has no CPU offload -> skipping cpu_adam (fused GPU Adam)"
 fi
 
-echo "=== distill FT ===  init=$CHECKPOINT_NAME  data=$DATA_PATH  max_steps=$MAX_STEPS  gpus=$NUM_DEVICES  distill_weight=$DISTILL_WEIGHT  out=$OUTPUT_DIR"
+echo "=== necessity FT ===  init=$CHECKPOINT_NAME  data=$DATA_PATH  max_steps=$MAX_STEPS  gpus=$NUM_DEVICES  necessity_weight=$NECESSITY_WEIGHT  margin=$NECESSITY_MARGIN  ablation=$NECESSITY_ABLATION  out=$OUTPUT_DIR"
 deepspeed --num_gpus "$NUM_DEVICES" src/train/train_lvr.py \
-    --run_name "Step1_distill_w${DISTILL_WEIGHT}_${MAX_STEPS}steps" \
+    --run_name "Step1_necessity_w${NECESSITY_WEIGHT}_m${NECESSITY_MARGIN}_${MAX_STEPS}steps" \
     --checkpoint_name "$CHECKPOINT_NAME" \
     --coconut True \
     --loss_lvr_fct mse \
@@ -94,8 +95,11 @@ deepspeed --num_gpus "$NUM_DEVICES" src/train/train_lvr.py \
     --loss_lvr_lambda "$LAMBDA_LVR" \
     --bf16 True --fp16 False \
     --disable_flash_attn2 True \
-    --use_bottleneck True \
-    --distill_weight "$DISTILL_WEIGHT" \
+    --use_bottleneck False \
+    --distill_weight 0.0 \
+    --necessity_weight "$NECESSITY_WEIGHT" \
+    --necessity_margin "$NECESSITY_MARGIN" \
+    --necessity_ablation "$NECESSITY_ABLATION" \
     --online_checkpoint False \
     --output_dir "$OUTPUT_DIR" \
     --num_train_epochs 1 \
