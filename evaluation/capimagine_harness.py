@@ -85,16 +85,19 @@ def _load_mme():
 
 
 def _load_vstar():
-    # NOTE: verify craigwu/vstar_bench's current schema (field names) with a dump; adjust if this errors.
+    # lmms-lab/vstar-bench EMBEDS images (JpegImageFile) + text/label/category; craigwu stores image as a
+    # path string (fails here). Matches the fix in evaluation.py's loader.
     from datasets import load_dataset
-    ds = load_dataset("craigwu/vstar_bench")["test"]
+    dsd = load_dataset("lmms-lab/vstar-bench")
+    ds = dsd["test"] if "test" in dsd else dsd[list(dsd.keys())[0]]
     out = []
     for d in ds:
-        q = d.get("question") or d.get("text") or ""
-        gold = d.get("label") or d.get("answer") or ""
+        q = d.get("text") or d.get("question") or ""
+        raw = str(d.get("label", d.get("answer", ""))).strip().upper()
+        gold = next((c for c in raw if c.isalpha()), raw[:1])   # "A" / "(A)" / "A." -> "A"
         out.append({"image": _to_pil(d["image"]),
                     "question": q + MC_TASK_INSTRUCTION,
-                    "gold": str(gold).strip().upper()[:1], "is_mc": True})
+                    "gold": gold, "is_mc": True})
     return out
 
 
